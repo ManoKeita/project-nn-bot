@@ -200,41 +200,45 @@ async def process_screenshot(message: discord.Message, attachment: discord.Attac
 
         await msg.edit(content="✅ 記録完了！", embed=embed)
 
-        # ========== コーチチャンネルへ転送 ==========
+        # ========== コーチにDMで転送 ==========
         links = load_links()
-        coach_channel_id = links.get(user_id)
+        coach_id = links.get(user_id)
 
-        if coach_channel_id:
-            coach_channel = message.guild.get_channel(int(coach_channel_id))
-            if coach_channel:
-                coach_embed = discord.Embed(
-                    title=f"📬 {user_name} から練習報告",
-                    color=0xff6600,
-                    timestamp=datetime.now()
-                )
-                coach_embed.set_author(name=user_name, icon_url=message.author.display_avatar.url)
-                coach_embed.add_field(name="📍 距離", value=f"**{result['distance_km']} km**", inline=True)
-                coach_embed.add_field(name="⏱ タイム", value=f"**{result['time']}**", inline=True)
-                if result.get("pace"):
-                    coach_embed.add_field(name="🏃 ペース", value=f"**{result['pace']}/km**", inline=True)
-                if result.get("avg_heart_rate"):
-                    coach_embed.add_field(name="❤️ 平均心拍", value=f"{result['avg_heart_rate']} bpm", inline=True)
-                if result.get("max_heart_rate"):
-                    coach_embed.add_field(name="💓 最大心拍", value=f"{result['max_heart_rate']} bpm", inline=True)
-                if result.get("calories"):
-                    coach_embed.add_field(name="🔥 カロリー", value=f"{result['calories']} kcal", inline=True)
-                coach_embed.set_footer(text=f"📱 {result.get('app_name','不明')} | {record_date}")
-                coach_embed.set_image(url=attachment.url)
+        if coach_id:
+            coach = message.guild.get_member(int(coach_id))
+            if coach:
+                try:
+                    coach_embed = discord.Embed(
+                        title=f"📬 {user_name} から練習報告",
+                        color=0xff6600,
+                        timestamp=datetime.now()
+                    )
+                    coach_embed.set_author(name=user_name, icon_url=message.author.display_avatar.url)
+                    coach_embed.add_field(name="📍 距離", value=f"**{result['distance_km']} km**", inline=True)
+                    coach_embed.add_field(name="⏱ タイム", value=f"**{result['time']}**", inline=True)
+                    if result.get("pace"):
+                        coach_embed.add_field(name="🏃 ペース", value=f"**{result['pace']}/km**", inline=True)
+                    if result.get("avg_heart_rate"):
+                        coach_embed.add_field(name="❤️ 平均心拍", value=f"{result['avg_heart_rate']} bpm", inline=True)
+                    if result.get("max_heart_rate"):
+                        coach_embed.add_field(name="💓 最大心拍", value=f"{result['max_heart_rate']} bpm", inline=True)
+                    if result.get("calories"):
+                        coach_embed.add_field(name="🔥 カロリー", value=f"{result['calories']} kcal", inline=True)
+                    coach_embed.set_footer(text=f"📱 {result.get('app_name','不明')} | {record_date}")
+                    coach_embed.set_image(url=attachment.url)
 
-                await coach_channel.send(
-                    content=f"📋 **新しい練習報告が届きました！** ({message.channel.mention} より)",
-                    embed=coach_embed
-                )
+                    await coach.send(
+                        content=f"📋 **{user_name} から新しい練習報告が届きました！**",
+                        embed=coach_embed
+                    )
+                except discord.Forbidden:
+                    await message.channel.send(
+                        f"⚠️ コーチへのDM送信に失敗しました。コーチのDM設定を確認してください。",
+                        delete_after=10
+                    )
         else:
-            # 紐付けがない場合は本人だけに通知
             await message.reply(
-                "⚠️ コーチチャンネルが未設定です。管理者に `/link` での紐付けを依頼してください。",
-                ephemeral=False,
+                "⚠️ コーチが未設定です。管理者に `/link` での紐付けを依頼してください。",
                 delete_after=10
             )
 
@@ -243,21 +247,21 @@ async def process_screenshot(message: discord.Message, attachment: discord.Attac
 
 # ========== 紐付けコマンド（管理者専用） ==========
 
-@bot.tree.command(name="link", description="【管理者】選手とコーチチャンネルを紐付ける")
+@bot.tree.command(name="link", description="【管理者】選手とコーチを紐付ける（練習報告がコーチのDMに届く）")
 @app_commands.describe(
     member="選手（メンション）",
-    channel="転送先チャンネル（コーチ専用部屋）"
+    coach="担当コーチ（メンション）"
 )
 @app_commands.checks.has_permissions(manage_channels=True)
-async def link(interaction: discord.Interaction, member: discord.Member, channel: discord.TextChannel):
+async def link(interaction: discord.Interaction, member: discord.Member, coach: discord.Member):
     links = load_links()
-    links[str(member.id)] = str(channel.id)
+    links[str(member.id)] = str(coach.id)
     save_links(links)
 
     embed = discord.Embed(title="✅ 紐付け完了！", color=0x00cc66)
     embed.add_field(name="選手", value=member.mention, inline=True)
-    embed.add_field(name="転送先", value=channel.mention, inline=True)
-    embed.set_footer(text="練習ログにスクショを投稿すると自動で転送されます")
+    embed.add_field(name="担当コーチ", value=coach.mention, inline=True)
+    embed.set_footer(text="練習ログにスクショを投稿するとコーチのDMに自動で届きます")
     await interaction.response.send_message(embed=embed)
 
 @link.error
