@@ -1,1 +1,1 @@
-worker: Automatically record screenshots bot.py
+worker: python bot.py
