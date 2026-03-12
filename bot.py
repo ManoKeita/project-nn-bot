@@ -289,16 +289,22 @@ async def linklist(interaction: discord.Interaction):
         await interaction.response.send_message("📭 紐付けがまだありません。`/link` で設定してください。", ephemeral=True)
         return
 
-    embed = discord.Embed(title="🔗 選手チャンネル紐付け一覧", color=0x3399ff)
-    for user_id, channel_id in links.items():
+    embed = discord.Embed(title="🔗 選手コーチ紐付け一覧", color=0x3399ff)
+    for user_id, coach_id in links.items():
         member = interaction.guild.get_member(int(user_id))
-        channel = interaction.guild.get_channel(int(channel_id))
+        coach = interaction.guild.get_member(int(coach_id))
         member_str = member.mention if member else f"不明({user_id})"
-        channel_str = channel.mention if channel else f"不明({channel_id})"
-        embed.add_field(name=member_str, value=f"→ {channel_str}", inline=False)
+        coach_str = coach.mention if coach else f"不明({coach_id})"
+        embed.add_field(name=member_str, value=f"→ {coach_str}", inline=False)
 
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
+
+@bot.tree.command(name="resetlinks", description="【管理者】全ての紐付けをリセットする")
+@app_commands.checks.has_permissions(manage_channels=True)
+async def resetlinks(interaction: discord.Interaction):
+    save_links({})
+    await interaction.response.send_message("🗑️ 全ての紐付けをリセットしました。`/link` で再設定してください。", ephemeral=True)
 # ========== その他コマンド ==========
 
 @bot.tree.command(name="record", description="タイムを手動で記録する")
