@@ -16,7 +16,7 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 DATA_FILE = "times.json"
 LINKS_FILE = "links.json"       # 選手ID → チャンネルID の紐付け
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
-RECORD_CHANNEL_NAME = "練習ログ"
+RECORD_CHANNEL_NAME = "📝練習ログ"
 
 # ========== データ管理 ==========
 
