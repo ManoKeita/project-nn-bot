@@ -454,3 +454,287 @@ async def myrecords(interaction: discord.Interaction):
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
 bot.run(os.environ["DISCORD_TOKEN"])
+
+# ========== Interval.icu 連携 ==========
+
+ICU_FILE = "icu_settings.json"
+SCHEDULE_FILE = "icu_schedule.json"
+
+def load_icu():
+    if os.path.exists(ICU_FILE):
+        with open(ICU_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    return {}
+
+def save_icu(data):
+    with open(ICU_FILE, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+def load_schedule():
+    if os.path.exists(SCHEDULE_FILE):
+        with open(SCHEDULE_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    return {}
+
+def save_schedule(data):
+    with open(SCHEDULE_FILE, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+async def fetch_icu_activities(api_key: str, athlete_id: str, date: str = None) -> list:
+    """Interval.icuから練習データを取得"""
+    if not date:
+        date = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
+
+    url = f"https://intervals.icu/api/v1/athlete/{athlete_id}/activities"
+    params = {"oldest": date, "newest": date}
+    auth = aiohttp.BasicAuth("API_KEY", api_key)
+
+    async with aiohttp.ClientSession() as session:
+        async with session.get(url, params=params, auth=auth) as resp:
+            if resp.status != 200:
+                return []
+            return await resp.json()
+
+async def fetch_icu_activity_detail(api_key: str, athlete_id: str, activity_id: str) -> dict:
+    """活動の詳細（ゾーン・負荷）を取得"""
+    url = f"https://intervals.icu/api/v1/athlete/{athlete_id}/activities/{activity_id}"
+    auth = aiohttp.BasicAuth("API_KEY", api_key)
+
+    async with aiohttp.ClientSession() as session:
+        async with session.get(url, auth=auth) as resp:
+            if resp.status != 200:
+                return {}
+            return await resp.json()
+
+def format_icu_embed(activity: dict, detail: dict, athlete_name: str) -> discord.Embed:
+    """Interval.icuデータをEmbedに整形"""
+    name = activity.get("name", "練習")
+    date = activity.get("start_date_local", "")[:10]
+
+    embed = discord.Embed(
+        title=f"📊 {athlete_name} の練習データ",
+        description=f"**{name}** — {date}",
+        color=0x4361ee,
+        timestamp=datetime.now()
+    )
+
+    # 基本データ
+    distance = activity.get("distance", 0)
+    if distance:
+        embed.add_field(name="📍 距離", value=f"**{distance/1000:.2f} km**", inline=True)
+
+    moving_time = activity.get("moving_time", 0)
+    if moving_time:
+        h, m = divmod(moving_time // 60, 60)
+        s = moving_time % 60
+        time_str = f"{h}:{m:02d}:{s:02d}" if h else f"{m}:{s:02d}"
+        embed.add_field(name="⏱ タイム", value=f"**{time_str}**", inline=True)
+
+    avg_speed = activity.get("average_speed", 0)
+    if avg_speed and distance:
+        pace_sec = 1000 / avg_speed
+        pace_str = f"{int(pace_sec//60)}:{int(pace_sec%60):02d}"
+        embed.add_field(name="🏃 ペース", value=f"**{pace_str}/km**", inline=True)
+
+    # 心拍数
+    avg_hr = activity.get("average_heartrate")
+    max_hr = activity.get("max_heartrate")
+    if avg_hr:
+        embed.add_field(name="❤️ 平均心拍", value=f"{int(avg_hr)} bpm", inline=True)
+    if max_hr:
+        embed.add_field(name="💓 最大心拍", value=f"{int(max_hr)} bpm", inline=True)
+
+    # 練習負荷
+    load = detail.get("training_load") or activity.get("training_load")
+    if load:
+        embed.add_field(name="💪 練習負荷", value=f"**{int(load)}**", inline=True)
+
+    # ペースゾーン（滞在時間）
+    pace_zones = detail.get("pace_zones") or []
+    if pace_zones:
+        zone_lines = []
+        for z in pace_zones[:5]:
+            zone_name = z.get("name", "")
+            secs = z.get("time", 0)
+            if secs > 0:
+                m, s = divmod(secs, 60)
+                zone_lines.append(f"{zone_name}: {m}分{s:02d}秒")
+        if zone_lines:
+            embed.add_field(name="⏱ ペース別滞在時間", value="\n".join(zone_lines), inline=False)
+
+    # 心拍ゾーン
+    hr_zones = detail.get("hr_zones") or []
+    if hr_zones:
+        zone_lines = []
+        for z in hr_zones[:5]:
+            zone_name = z.get("name", "")
+            secs = z.get("time", 0)
+            if secs > 0:
+                m, s = divmod(secs, 60)
+                zone_lines.append(f"{zone_name}: {m}分{s:02d}秒")
+        if zone_lines:
+            embed.add_field(name="❤️ 心拍ゾーン別滞在時間", value="\n".join(zone_lines), inline=False)
+
+    embed.set_footer(text="📱 Interval.icu")
+    return embed
+
+async def send_icu_report(bot_instance, coach_id: str, api_key: str, athletes: dict, date: str = None):
+    """コーチに全選手のレポートを送信"""
+    coach = bot_instance.get_user(int(coach_id))
+    if not coach:
+        return
+
+    if not date:
+        date = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
+
+    sent = 0
+    for athlete_name, athlete_id in athletes.items():
+        activities = await fetch_icu_activities(api_key, athlete_id, date)
+        if not activities:
+            continue
+        for act in activities[:1]:  # 最新1件
+            detail = await fetch_icu_activity_detail(api_key, athlete_id, act.get("id", ""))
+            embed = format_icu_embed(act, detail, athlete_name)
+            try:
+                await coach.send(embed=embed)
+                sent += 1
+            except:
+                pass
+
+    if sent == 0:
+        try:
+            await coach.send(f"📭 {date} の練習データはありませんでした。")
+        except:
+            pass
+
+# ========== 定時送信タスク ==========
+
+from discord.ext import tasks
+
+@tasks.loop(minutes=1)
+async def icu_scheduler():
+    """毎分チェックして設定時刻に送信"""
+    now = datetime.now().strftime("%H:%M")
+    schedule = load_schedule()
+    icu = load_icu()
+
+    for coach_id, time_str in schedule.items():
+        if time_str == now:
+            athletes = icu.get(coach_id, {}).get("athletes", {})
+            api_key = icu.get(coach_id, {}).get("api_key", "")
+            if api_key and athletes:
+                await send_icu_report(bot, coach_id, api_key, athletes)
+
+@bot.listen("on_ready")
+async def start_scheduler():
+    if not icu_scheduler.is_running():
+        icu_scheduler.start()
+
+# ========== Interval.icu コマンド ==========
+
+@bot.tree.command(name="icu_setup", description="【コーチ】Interval.icu APIキーと選手を登録する")
+@app_commands.describe(
+    api_key="Interval.icu の APIキー",
+    athlete_name="選手の名前",
+    athlete_id="選手のInterval.icuアスリートID"
+)
+async def icu_setup(interaction: discord.Interaction, api_key: str, athlete_name: str, athlete_id: str):
+    icu = load_icu()
+    coach_id = str(interaction.user.id)
+
+    if coach_id not in icu:
+        icu[coach_id] = {"api_key": api_key, "athletes": {}}
+
+    icu[coach_id]["api_key"] = api_key
+    icu[coach_id]["athletes"][athlete_name] = athlete_id
+    save_icu(icu)
+
+    embed = discord.Embed(title="✅ Interval.icu 設定完了！", color=0x00cc66)
+    embed.add_field(name="選手", value=athlete_name, inline=True)
+    embed.add_field(name="アスリートID", value=athlete_id, inline=True)
+    embed.set_footer(text="/icu_setup を繰り返して選手を追加できます")
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+@bot.tree.command(name="icu", description="選手のInterval.icu練習データを取得")
+@app_commands.describe(
+    athlete_name="選手の名前",
+    date="日付（例: 2026-03-14）省略すると昨日"
+)
+async def icu(interaction: discord.Interaction, athlete_name: str, date: str = None):
+    await interaction.response.defer()
+    icu_data = load_icu()
+    coach_id = str(interaction.user.id)
+
+    if coach_id not in icu_data:
+        await interaction.followup.send("❌ 先に `/icu_setup` でAPIキーを設定してください。", ephemeral=True)
+        return
+
+    api_key = icu_data[coach_id]["api_key"]
+    athletes = icu_data[coach_id]["athletes"]
+
+    if athlete_name not in athletes:
+        names = "、".join(athletes.keys())
+        await interaction.followup.send(f"❌ 選手が見つかりません。登録済み: {names}", ephemeral=True)
+        return
+
+    athlete_id = athletes[athlete_name]
+    target_date = date or (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
+
+    activities = await fetch_icu_activities(api_key, athlete_id, target_date)
+    if not activities:
+        await interaction.followup.send(f"📭 {athlete_name} の {target_date} の練習データはありません。")
+        return
+
+    for act in activities[:1]:
+        detail = await fetch_icu_activity_detail(api_key, athlete_id, act.get("id", ""))
+        embed = format_icu_embed(act, detail, athlete_name)
+        await interaction.followup.send(embed=embed)
+
+@bot.tree.command(name="icu_settime", description="【コーチ】Interval.icuレポートの自動送信時刻を設定")
+@app_commands.describe(time="送信時刻（例: 09:00）")
+async def icu_settime(interaction: discord.Interaction, time: str):
+    # 時刻フォーマット確認
+    try:
+        datetime.strptime(time, "%H:%M")
+    except:
+        await interaction.response.send_message("❌ 時刻の形式が違います。例: `09:00`", ephemeral=True)
+        return
+
+    schedule = load_schedule()
+    schedule[str(interaction.user.id)] = time
+    save_schedule(schedule)
+
+    embed = discord.Embed(title="✅ 自動送信時刻を設定しました！", color=0x00cc66)
+    embed.add_field(name="送信時刻", value=f"毎日 **{time}**", inline=True)
+    embed.set_footer(text="前日の全選手の練習データがDMに届きます")
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+@bot.tree.command(name="icu_canceltime", description="【コーチ】自動送信をキャンセル")
+async def icu_canceltime(interaction: discord.Interaction):
+    schedule = load_schedule()
+    coach_id = str(interaction.user.id)
+    if coach_id in schedule:
+        del schedule[coach_id]
+        save_schedule(schedule)
+        await interaction.response.send_message("✅ 自動送信をキャンセルしました。", ephemeral=True)
+    else:
+        await interaction.response.send_message("❌ 自動送信は設定されていません。", ephemeral=True)
+
+@bot.tree.command(name="icu_athletes", description="【コーチ】登録済み選手一覧を表示")
+async def icu_athletes(interaction: discord.Interaction):
+    icu_data = load_icu()
+    coach_id = str(interaction.user.id)
+
+    if coach_id not in icu_data or not icu_data[coach_id].get("athletes"):
+        await interaction.response.send_message("📭 選手が登録されていません。`/icu_setup` で登録してください。", ephemeral=True)
+        return
+
+    athletes = icu_data[coach_id]["athletes"]
+    schedule = load_schedule()
+    time_str = schedule.get(coach_id, "未設定")
+
+    embed = discord.Embed(title="👥 登録済み選手一覧", color=0x3399ff)
+    for name, aid in athletes.items():
+        embed.add_field(name=name, value=f"ID: {aid}", inline=True)
+    embed.set_footer(text=f"自動送信時刻: {time_str}")
+    await interaction.response.send_message(embed=embed, ephemeral=True)
