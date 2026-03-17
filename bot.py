@@ -457,6 +457,7 @@ async def myrecords(interaction: discord.Interaction):
 
 ICU_FILE = "icu_settings.json"
 SCHEDULE_FILE = "icu_schedule.json"
+SUBMISSION_FILE = "submissions.json"  # 提出済み記録
 
 def load_icu():
     if os.path.exists(ICU_FILE):
@@ -477,6 +478,207 @@ def load_schedule():
 def save_schedule(data):
     with open(SCHEDULE_FILE, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
+
+# ========== 提出管理 ==========
+
+def load_submissions():
+    if os.path.exists(SUBMISSION_FILE):
+        with open(SUBMISSION_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    return {}
+
+def save_submissions(data):
+    with open(SUBMISSION_FILE, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+def mark_submitted(athlete_id: str, date: str):
+    """指定日に提出済みとしてマーク"""
+    subs = load_submissions()
+    if athlete_id not in subs:
+        subs[athlete_id] = []
+    if date not in subs[athlete_id]:
+        subs[athlete_id].append(date)
+    save_submissions(subs)
+
+def has_submitted(athlete_id: str, date: str) -> bool:
+    subs = load_submissions()
+    return date in subs.get(athlete_id, [])
+
+# ========== 選手情報ヘルパー ==========
+
+def get_athlete_icu_id(athlete_data) -> str:
+    """新旧両形式からICU IDを返す"""
+    if isinstance(athlete_data, dict):
+        return athlete_data.get("icu_id", "")
+    return athlete_data  # 旧形式: 文字列
+
+def get_athlete_discord_id(athlete_data) -> str | None:
+    """新形式からDiscord IDを返す（旧形式はNone）"""
+    if isinstance(athlete_data, dict):
+        return athlete_data.get("discord_id")
+    return None
+
+# ========== 疲労検知 ==========
+
+async def fetch_icu_activities_range(api_key: str, athlete_id: str, oldest: str, newest: str) -> list:
+    """指定期間のICUデータを取得"""
+    url = f"https://intervals.icu/api/v1/athlete/{athlete_id}/activities"
+    params = {"oldest": oldest, "newest": newest}
+    auth = aiohttp.BasicAuth("API_KEY", api_key)
+    async with aiohttp.ClientSession() as session:
+        async with session.get(url, params=params, auth=auth) as resp:
+            if resp.status != 200:
+                return []
+            return await resp.json()
+
+def calc_fatigue_stats(activities: list) -> dict:
+    """HR・ペース・TSSから疲労指標を算出"""
+    hrs, paces, tss_list, loads = [], [], [], []
+    for act in activities:
+        if act.get("average_heartrate"):
+            hrs.append(act["average_heartrate"])
+        speed = act.get("average_speed", 0)
+        if speed and act.get("distance", 0):
+            paces.append(1000 / speed)  # sec/km
+        tss = act.get("icu_training_load") or act.get("training_load") or act.get("tss")
+        if tss:
+            tss_list.append(tss)
+        load = act.get("icu_rpe_load") or act.get("session_rpe")
+        if load:
+            loads.append(load)
+
+    return {
+        "count": len(activities),
+        "avg_hr": round(sum(hrs) / len(hrs), 1) if hrs else None,
+        "avg_pace_sec": round(sum(paces) / len(paces), 1) if paces else None,
+        "total_tss": round(sum(tss_list), 1) if tss_list else None,
+        "avg_tss": round(sum(tss_list) / len(tss_list), 1) if tss_list else None,
+        "total_distance_km": round(sum(act.get("distance", 0) for act in activities) / 1000, 1),
+    }
+
+def detect_fatigue(week: dict, month: dict, three_month: dict) -> list:
+    """疲労シグナルを検出してメッセージリストを返す"""
+    warnings = []
+
+    # ① 3ヶ月平均と比較してHRが上昇（ペース同等以下でも心拍増加）
+    if (week.get("avg_hr") and three_month.get("avg_hr") and
+            week["avg_hr"] > three_month["avg_hr"] * 1.05):
+        delta = round(week["avg_hr"] - three_month["avg_hr"], 1)
+        warnings.append(f"❤️ 今週の平均心拍が3ヶ月平均より **+{delta} bpm** 高い（疲労蓄積の可能性）")
+
+    # ② ペース低下（pace_secが大きい＝遅い）
+    if (week.get("avg_pace_sec") and three_month.get("avg_pace_sec") and
+            week["avg_pace_sec"] > three_month["avg_pace_sec"] * 1.04):
+        w_pace = f"{int(week['avg_pace_sec']//60)}:{int(week['avg_pace_sec']%60):02d}"
+        b_pace = f"{int(three_month['avg_pace_sec']//60)}:{int(three_month['avg_pace_sec']%60):02d}"
+        warnings.append(f"🏃 今週の平均ペース **{w_pace}/km** が3ヶ月平均 {b_pace}/km より低下")
+
+    # ③ 週間TSSが1ヶ月平均の週換算より25%以上高い（過負荷）
+    if (week.get("total_tss") and month.get("total_tss") and month["count"] > 0):
+        monthly_weekly_avg = (month["total_tss"] / month["count"]) * 7 if month["count"] else 0
+        if monthly_weekly_avg > 0 and week["total_tss"] > monthly_weekly_avg * 1.25:
+            warnings.append(f"⚡ 今週のTSS **{week['total_tss']}** が月間週平均の125%超（過負荷注意）")
+
+    # ④ 週の練習回数が急増（3ヶ月平均の週換算より50%以上増）
+    if three_month.get("count"):
+        three_month_weekly_avg = three_month["count"] / 13  # 約13週
+        if week["count"] > three_month_weekly_avg * 1.5 and week["count"] >= 2:
+            warnings.append(f"📅 今週の練習回数 **{week['count']}回** が3ヶ月平均の1.5倍超（急増注意）")
+
+    return warnings
+
+def pace_sec_to_str(sec: float) -> str:
+    if not sec:
+        return "—"
+    return f"{int(sec//60)}:{int(sec%60):02d}"
+
+# ========== AIコメント生成 ==========
+
+async def generate_ai_comment(athlete_name: str, activity: dict, detail: dict,
+                               history_week: list, history_month: list) -> str:
+    """Claudeがコーチ視点で練習コメントを生成"""
+
+    def summarize(acts: list) -> dict:
+        if not acts:
+            return {}
+        paces, hrs, tss_list = [], [], []
+        for a in acts:
+            sp = a.get("average_speed", 0)
+            if sp:
+                paces.append(1000 / sp)
+            hr = a.get("average_heartrate")
+            if hr:
+                hrs.append(hr)
+            tss = a.get("icu_training_load") or a.get("training_load") or a.get("tss")
+            if tss:
+                tss_list.append(tss)
+        return {
+            "avg_pace_sec": round(sum(paces)/len(paces), 1) if paces else None,
+            "avg_hr": round(sum(hrs)/len(hrs), 1) if hrs else None,
+            "avg_tss": round(sum(tss_list)/len(tss_list), 1) if tss_list else None,
+            "count": len(acts),
+        }
+
+    today_speed = activity.get("average_speed", 0)
+    today_pace_str = pace_sec_to_str(1000 / today_speed) if today_speed else "不明"
+    today_hr = activity.get("average_heartrate")
+    today_tss = (activity.get("icu_training_load") or activity.get("training_load")
+                 or activity.get("tss"))
+    today_distance = round(activity.get("distance", 0) / 1000, 2)
+
+    week_sum = summarize(history_week)
+    month_sum = summarize(history_month)
+
+    context = f"""
+選手名: {athlete_name}
+今日の練習:
+  距離: {today_distance} km
+  ペース: {today_pace_str}/km
+  平均心拍: {today_hr or '不明'} bpm
+  TSS: {today_tss or '不明'}
+  練習名: {activity.get('name', '不明')}
+
+過去7日間の平均:
+  ペース: {pace_sec_to_str(week_sum.get('avg_pace_sec'))}/km
+  平均心拍: {week_sum.get('avg_hr') or '不明'} bpm
+  平均TSS: {week_sum.get('avg_tss') or '不明'}
+  練習回数: {week_sum.get('count', 0)}回
+
+過去30日間の平均:
+  ペース: {pace_sec_to_str(month_sum.get('avg_pace_sec'))}/km
+  平均心拍: {month_sum.get('avg_hr') or '不明'} bpm
+  平均TSS: {month_sum.get('avg_tss') or '不明'}
+  練習回数: {month_sum.get('count', 0)}回
+"""
+
+    prompt = f"""あなたは中長距離ランナーのコーチです。以下のデータを見て、コーチ視点で短いコメントを2〜3つ生成してください。
+各コメントは1行で完結させ、箇条書き（・）で出力してください。
+具体的な数値の変化（%や秒差）を含め、良い点・改善点・注意点をバランスよく伝えてください。
+余計な前置きや説明は不要です。コメントのみを出力してください。
+
+{context}"""
+
+    headers = {
+        "x-api-key": ANTHROPIC_API_KEY,
+        "anthropic-version": "2023-06-01",
+        "content-type": "application/json"
+    }
+    body = {
+        "model": "claude-opus-4-6",
+        "max_tokens": 400,
+        "messages": [{"role": "user", "content": prompt}]
+    }
+
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post("https://api.anthropic.com/v1/messages",
+                                    headers=headers, json=body) as resp:
+                if resp.status != 200:
+                    return ""
+                result = await resp.json()
+                return result["content"][0]["text"].strip()
+    except Exception:
+        return ""
 
 async def fetch_icu_activities(api_key: str, athlete_id: str, date: str = None) -> list:
     """Interval.icuから練習データを取得"""
@@ -577,7 +779,13 @@ def format_icu_embed(activity: dict, detail: dict, athlete_name: str) -> discord
     return embed
 
 async def send_icu_report(bot_instance, coach_id: str, api_key: str, athletes: dict, date: str = None):
-    """コーチに全選手のレポートを送信"""
+    """
+    定時レポート送信:
+      - 練習データ + 統計サマリー  → コーチにDM
+      - 疲労検知アラート           → 選手本人にDM（検知時のみ）
+      - AIコーチコメント           → 選手本人 + コーチ 両方にDM
+      - 未提出アラート             → コーチにDM
+    """
     coach = bot_instance.get_user(int(coach_id))
     if not coach:
         return
@@ -585,24 +793,204 @@ async def send_icu_report(bot_instance, coach_id: str, api_key: str, athletes: d
     if not date:
         date = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
 
+    today = datetime.strptime(date, "%Y-%m-%d")
+
+    oldest_week  = (today - timedelta(days=7)).strftime("%Y-%m-%d")
+    oldest_month = (today - timedelta(days=30)).strftime("%Y-%m-%d")
+    oldest_3m    = (today - timedelta(days=90)).strftime("%Y-%m-%d")
+
     sent = 0
-    for athlete_name, athlete_id in athletes.items():
-        activities = await fetch_icu_activities(api_key, athlete_id, date)
-        if not activities:
-            continue
-        for act in activities[:1]:  # 最新1件
-            detail = await fetch_icu_activity_detail(api_key, athlete_id, act.get("id", ""))
-            embed = format_icu_embed(act, detail, athlete_name)
+    no_submit = []
+
+    for athlete_name, athlete_data in athletes.items():
+        icu_id      = get_athlete_icu_id(athlete_data)
+        discord_id  = get_athlete_discord_id(athlete_data)
+
+        # 選手のDiscordユーザーオブジェクトを取得（DM送信用）
+        athlete_user = None
+        if discord_id:
             try:
-                await coach.send(embed=embed)
+                athlete_user = bot_instance.get_user(int(discord_id)) or await bot_instance.fetch_user(int(discord_id))
+            except Exception:
+                athlete_user = None
+
+        activities = await fetch_icu_activities(api_key, icu_id, date)
+
+        # ── 未提出アラート ──
+        if not activities:
+            no_submit.append((athlete_name, athlete_user))
+            continue
+
+        mark_submitted(icu_id, date)
+
+        for act in activities[:1]:
+            detail = await fetch_icu_activity_detail(api_key, icu_id, act.get("id", ""))
+
+            # 期間データ取得
+            acts_week  = await fetch_icu_activities_range(api_key, icu_id, oldest_week,  date)
+            acts_month = await fetch_icu_activities_range(api_key, icu_id, oldest_month, date)
+            acts_3m    = await fetch_icu_activities_range(api_key, icu_id, oldest_3m,    date)
+
+            stats_week  = calc_fatigue_stats(acts_week)
+            stats_month = calc_fatigue_stats(acts_month)
+            stats_3m    = calc_fatigue_stats(acts_3m)
+            fatigue_warnings = detect_fatigue(stats_week, stats_month, stats_3m)
+
+            # ── コーチ向けレポートEmbed（全情報） ──
+            coach_embed = format_icu_embed(act, detail, athlete_name)
+
+            stats_lines = (
+                f"**7日間** — {stats_week.get('count',0)}回 ｜ {stats_week.get('total_distance_km',0)}km"
+                f" ｜ HR {stats_week.get('avg_hr') or '—'} bpm ｜ TSS {stats_week.get('total_tss') or '—'}\n"
+                f"**30日間** — {stats_month.get('count',0)}回 ｜ {stats_month.get('total_distance_km',0)}km"
+                f" ｜ HR {stats_month.get('avg_hr') or '—'} bpm ｜ TSS {stats_month.get('total_tss') or '—'}\n"
+                f"**90日間** — {stats_3m.get('count',0)}回 ｜ {stats_3m.get('total_distance_km',0)}km"
+                f" ｜ HR {stats_3m.get('avg_hr') or '—'} bpm ｜ TSS {stats_3m.get('total_tss') or '—'}"
+            )
+            coach_embed.add_field(name="📈 練習負荷統計（7/30/90日）", value=stats_lines, inline=False)
+
+            if fatigue_warnings:
+                coach_embed.add_field(
+                    name="⚠️ 疲労検知アラート",
+                    value="\n".join(fatigue_warnings),
+                    inline=False
+                )
+
+            # ── AIコメント生成 ──
+            ai_comment = await generate_ai_comment(athlete_name, act, detail, acts_week, acts_month)
+            if ai_comment:
+                coach_embed.add_field(name="🤖 AIコーチコメント", value=ai_comment, inline=False)
+
+            # コーチにDM送信
+            try:
+                await coach.send(embed=coach_embed)
                 sent += 1
-            except:
+            except Exception:
                 pass
 
-    if sent == 0:
+            # ── 選手へのDM送信 ──
+            if athlete_user:
+
+                # 疲労アラートがある場合 → 選手にDM
+                if fatigue_warnings:
+                    fatigue_embed = discord.Embed(
+                        title="⚠️ 疲労検知アラート",
+                        description=f"**{date}** のデータを元に疲労の兆候が検出されました。",
+                        color=0xff6b35,
+                        timestamp=datetime.now()
+                    )
+                    fatigue_embed.add_field(
+                        name="検出された項目",
+                        value="\n".join(fatigue_warnings),
+                        inline=False
+                    )
+                    fatigue_embed.add_field(
+                        name="📈 参考データ（7日間）",
+                        value=(
+                            f"練習回数: {stats_week.get('count',0)}回 ｜ {stats_week.get('total_distance_km',0)}km\n"
+                            f"平均心拍: {stats_week.get('avg_hr') or '—'} bpm ｜ "
+                            f"平均ペース: {pace_sec_to_str(stats_week.get('avg_pace_sec'))}/km\n"
+                            f"TSS合計: {stats_week.get('total_tss') or '—'}"
+                        ),
+                        inline=False
+                    )
+                    fatigue_embed.set_footer(text="無理せず休養も大切にしてください 🙏")
+                    try:
+                        await athlete_user.send(
+                            content="📩 **PROJECT NN コーチングシステムからお知らせ**",
+                            embed=fatigue_embed
+                        )
+                    except Exception:
+                        pass
+                    # コーチにも同じ疲労アラートをDM
+                    try:
+                        await coach.send(
+                            content=f"⚠️ **{athlete_name} に疲労検知アラートを送信しました**",
+                            embed=fatigue_embed
+                        )
+                    except Exception:
+                        pass
+
+                # AIコメントがある場合 → 選手にDM
+                if ai_comment:
+                    ai_embed = discord.Embed(
+                        title=f"🤖 {date} の練習フィードバック",
+                        description=f"**{act.get('name', '練習')}** のデータを元にコメントを生成しました。",
+                        color=0x4361ee,
+                        timestamp=datetime.now()
+                    )
+                    # 今日の練習サマリーも添付
+                    dist_km = round(act.get("distance", 0) / 1000, 2)
+                    speed = act.get("average_speed", 0)
+                    pace_str = pace_sec_to_str(1000 / speed) if speed else "—"
+                    hr = act.get("average_heartrate")
+                    tss = act.get("icu_training_load") or act.get("training_load") or act.get("tss")
+                    ai_embed.add_field(
+                        name="📊 本日の練習",
+                        value=(
+                            f"距離: **{dist_km} km** ｜ ペース: **{pace_str}/km**\n"
+                            f"平均心拍: {int(hr) if hr else '—'} bpm ｜ TSS: {tss or '—'}"
+                        ),
+                        inline=False
+                    )
+                    ai_embed.add_field(name="💬 AIコメント", value=ai_comment, inline=False)
+                    ai_embed.set_footer(text="PROJECT NN | Interval.icu データより自動生成")
+                    try:
+                        await athlete_user.send(
+                            content="📩 **本日の練習フィードバックが届きました！**",
+                            embed=ai_embed
+                        )
+                    except Exception:
+                        pass
+
+    # ── 未提出選手：コーチにまとめてアラート＋選手本人にも個別DM ──
+    if no_submit:
+        # コーチへまとめて通知
+        alert_embed = discord.Embed(
+            title="🚨 練習未提出アラート",
+            description=f"**{date}** の練習データが届いていない選手がいます。",
+            color=0xff4444,
+            timestamp=datetime.now()
+        )
+        alert_embed.add_field(
+            name=f"未提出選手 ({len(no_submit)}名)",
+            value="\n".join(f"• {name}" for name, _ in no_submit),
+            inline=False
+        )
+        alert_embed.set_footer(text="Interval.icu にデータが登録されていない可能性があります")
+        try:
+            await coach.send(embed=alert_embed)
+        except Exception:
+            pass
+
+        # 選手本人へ個別DM
+        for athlete_name, athlete_user in no_submit:
+            if not athlete_user:
+                continue
+            athlete_alert = discord.Embed(
+                title="📋 練習記録の未提出のお知らせ",
+                description=f"**{date}** の練習データがまだ Interval.icu に登録されていません。",
+                color=0xff9900,
+                timestamp=datetime.now()
+            )
+            athlete_alert.add_field(
+                name="対応をお願いします",
+                value="練習を行った場合はアプリを同期してください。\nお休みの場合はコーチまでご連絡ください。",
+                inline=False
+            )
+            athlete_alert.set_footer(text="PROJECT NN コーチングシステム")
+            try:
+                await athlete_user.send(
+                    content="📩 **練習記録の未提出があります**",
+                    embed=athlete_alert
+                )
+            except Exception:
+                pass
+
+    if sent == 0 and not no_submit:
         try:
             await coach.send(f"📭 {date} の練習データはありませんでした。")
-        except:
+        except Exception:
             pass
 
 # ========== 定時送信タスク ==========
@@ -635,10 +1023,12 @@ async def start_scheduler():
     coach="DM送信先のコーチ（メンション）",
     api_key="Interval.icu の APIキー",
     athlete_name="選手の名前",
-    athlete_id="選手のInterval.icuアスリートID"
+    athlete_id="選手のInterval.icuアスリートID",
+    athlete_member="選手のDiscordアカウント（メンション）省略可 - DMを送るために必要"
 )
 @app_commands.checks.has_permissions(manage_guild=True)
-async def icu_setup(interaction: discord.Interaction, coach: discord.Member, api_key: str, athlete_name: str, athlete_id: str):
+async def icu_setup(interaction: discord.Interaction, coach: discord.Member, api_key: str,
+                    athlete_name: str, athlete_id: str, athlete_member: discord.Member = None):
     icu = load_icu()
     coach_id = str(coach.id)
 
@@ -646,29 +1036,34 @@ async def icu_setup(interaction: discord.Interaction, coach: discord.Member, api
         icu[coach_id] = {"api_key": api_key, "athletes": {}}
 
     icu[coach_id]["api_key"] = api_key
-    icu[coach_id]["athletes"][athlete_name] = athlete_id
+    # 選手情報：ICU IDとDiscord IDを辞書で保存（後方互換: 旧形式の文字列も考慮）
+    icu[coach_id]["athletes"][athlete_name] = {
+        "icu_id": athlete_id,
+        "discord_id": str(athlete_member.id) if athlete_member else None
+    }
     save_icu(icu)
 
     embed = discord.Embed(title="✅ Interval.icu 設定完了！", color=0x00cc66)
     embed.add_field(name="コーチ", value=coach.mention, inline=True)
-    embed.add_field(name="選手", value=athlete_name, inline=True)
-    embed.add_field(name="アスリートID", value=athlete_id, inline=True)
+    embed.add_field(name="選手名", value=athlete_name, inline=True)
+    embed.add_field(name="ICU ID", value=athlete_id, inline=True)
+    embed.add_field(name="Discord", value=athlete_member.mention if athlete_member else "未設定（DMなし）", inline=True)
     embed.set_footer(text="/icu_setup を繰り返して選手を追加できます")
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
 @bot.tree.command(name="icu", description="選手のInterval.icu練習データを取得")
 @app_commands.describe(
-    coach="対象コーチ（省略すると自分）",
+    coach="対象コーチ（メンション）",
     athlete_name="選手の名前",
     date="日付（例: 2026-03-14）省略すると昨日"
 )
-async def icu(interaction: discord.Interaction, athlete_name: str, date: str = None, coach: discord.Member = None):
+async def icu(interaction: discord.Interaction, coach: discord.Member, athlete_name: str, date: str = None):
     await interaction.response.defer()
     icu_data = load_icu()
-    coach_id = str(coach.id) if coach else str(interaction.user.id)
+    coach_id = str(coach.id)
 
     if coach_id not in icu_data:
-        await interaction.followup.send("❌ 先に `/icu_setup` でコーチと選手を登録してください。", ephemeral=True)
+        await interaction.followup.send(f"❌ {coach.mention} は `/icu_setup` で登録されていません。", ephemeral=True)
         return
 
     api_key = icu_data[coach_id]["api_key"]
@@ -679,7 +1074,7 @@ async def icu(interaction: discord.Interaction, athlete_name: str, date: str = N
         await interaction.followup.send(f"❌ 選手が見つかりません。登録済み: {names}", ephemeral=True)
         return
 
-    athlete_id = athletes[athlete_name]
+    athlete_id = get_athlete_icu_id(athletes[athlete_name])
     target_date = date or (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
 
     activities = await fetch_icu_activities(api_key, athlete_id, target_date)
@@ -687,9 +1082,44 @@ async def icu(interaction: discord.Interaction, athlete_name: str, date: str = N
         await interaction.followup.send(f"📭 {athlete_name} の {target_date} の練習データはありません。")
         return
 
+    today = datetime.strptime(target_date, "%Y-%m-%d")
     for act in activities[:1]:
         detail = await fetch_icu_activity_detail(api_key, athlete_id, act.get("id", ""))
         embed = format_icu_embed(act, detail, athlete_name)
+
+        # 疲労検知
+        oldest_week  = (today - timedelta(days=7)).strftime("%Y-%m-%d")
+        oldest_month = (today - timedelta(days=30)).strftime("%Y-%m-%d")
+        oldest_3m    = (today - timedelta(days=90)).strftime("%Y-%m-%d")
+        acts_week  = await fetch_icu_activities_range(api_key, athlete_id, oldest_week, target_date)
+        acts_month = await fetch_icu_activities_range(api_key, athlete_id, oldest_month, target_date)
+        acts_3m    = await fetch_icu_activities_range(api_key, athlete_id, oldest_3m, target_date)
+        stats_week  = calc_fatigue_stats(acts_week)
+        stats_month = calc_fatigue_stats(acts_month)
+        stats_3m    = calc_fatigue_stats(acts_3m)
+        fatigue_warnings = detect_fatigue(stats_week, stats_month, stats_3m)
+        if fatigue_warnings:
+            embed.add_field(
+                name="⚠️ 疲労検知アラート",
+                value="\n".join(fatigue_warnings),
+                inline=False
+            )
+
+        stats_lines = (
+            f"**7日間** — {stats_week.get('count',0)}回 ｜ {stats_week.get('total_distance_km',0)}km"
+            f"｜ avg HR {stats_week.get('avg_hr') or '—'} bpm ｜ TSS {stats_week.get('total_tss') or '—'}\n"
+            f"**30日間** — {stats_month.get('count',0)}回 ｜ {stats_month.get('total_distance_km',0)}km"
+            f"｜ avg HR {stats_month.get('avg_hr') or '—'} bpm ｜ TSS {stats_month.get('total_tss') or '—'}\n"
+            f"**90日間** — {stats_3m.get('count',0)}回 ｜ {stats_3m.get('total_distance_km',0)}km"
+            f"｜ avg HR {stats_3m.get('avg_hr') or '—'} bpm ｜ TSS {stats_3m.get('total_tss') or '—'}"
+        )
+        embed.add_field(name="📈 練習負荷統計", value=stats_lines, inline=False)
+
+        # AIコメント
+        ai_comment = await generate_ai_comment(athlete_name, act, detail, acts_week, acts_month)
+        if ai_comment:
+            embed.add_field(name="🤖 AIコーチコメント", value=ai_comment, inline=False)
+
         await interaction.followup.send(embed=embed)
 
 @bot.tree.command(name="icu_settime", description="【管理者】Interval.icuレポートの自動送信時刻を設定")
@@ -716,8 +1146,69 @@ async def icu_settime(interaction: discord.Interaction, coach: discord.Member, t
     embed.set_footer(text="前日の全選手の練習データがDMに届きます")
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
+@bot.tree.command(name="icu_fatigue", description="選手の疲労状況を確認する")
+@app_commands.describe(
+    coach="対象コーチ（メンション）",
+    athlete_name="選手の名前",
+    date="基準日（省略で今日）"
+)
+async def icu_fatigue(interaction: discord.Interaction, coach: discord.Member,
+                      athlete_name: str, date: str = None):
+    await interaction.response.defer()
+    icu_data = load_icu()
+    coach_id = str(coach.id)
+    if coach_id not in icu_data:
+        await interaction.followup.send("❌ コーチが登録されていません。", ephemeral=True)
+        return
+    api_key = icu_data[coach_id]["api_key"]
+    athletes = icu_data[coach_id]["athletes"]
+    if athlete_name not in athletes:
+        await interaction.followup.send(f"❌ 選手 '{athlete_name}' が見つかりません。", ephemeral=True)
+        return
+
+    athlete_id = get_athlete_icu_id(athletes[athlete_name])
+    target_date = date or datetime.now().strftime("%Y-%m-%d")
+    today = datetime.strptime(target_date, "%Y-%m-%d")
+
+    oldest_week  = (today - timedelta(days=7)).strftime("%Y-%m-%d")
+    oldest_month = (today - timedelta(days=30)).strftime("%Y-%m-%d")
+    oldest_3m    = (today - timedelta(days=90)).strftime("%Y-%m-%d")
+
+    acts_week  = await fetch_icu_activities_range(api_key, athlete_id, oldest_week, target_date)
+    acts_month = await fetch_icu_activities_range(api_key, athlete_id, oldest_month, target_date)
+    acts_3m    = await fetch_icu_activities_range(api_key, athlete_id, oldest_3m, target_date)
+
+    s_w = calc_fatigue_stats(acts_week)
+    s_m = calc_fatigue_stats(acts_month)
+    s_3 = calc_fatigue_stats(acts_3m)
+    warnings = detect_fatigue(s_w, s_m, s_3)
+
+    embed = discord.Embed(
+        title=f"🔬 {athlete_name} 疲労分析レポート",
+        description=f"基準日: {target_date}",
+        color=0xff6b35,
+        timestamp=datetime.now()
+    )
+
+    def row(s: dict, label: str) -> str:
+        p = pace_sec_to_str(s.get("avg_pace_sec"))
+        return (f"練習: **{s.get('count',0)}回** ｜ {s.get('total_distance_km',0)}km\n"
+                f"avg HR: {s.get('avg_hr') or '—'} bpm ｜ ペース: {p}\n"
+                f"TSS合計: {s.get('total_tss') or '—'} ｜ avg: {s.get('avg_tss') or '—'}")
+
+    embed.add_field(name="📅 7日間",  value=row(s_w, "週"), inline=True)
+    embed.add_field(name="📆 30日間", value=row(s_m, "月"), inline=True)
+    embed.add_field(name="📊 90日間", value=row(s_3, "3ヶ月"), inline=True)
+
+    if warnings:
+        embed.add_field(name="⚠️ 疲労シグナル", value="\n".join(warnings), inline=False)
+    else:
+        embed.add_field(name="✅ 疲労シグナル", value="現時点で疲労の兆候は検出されていません。", inline=False)
+
+    embed.set_footer(text="Interval.icu データを元に算出")
+    await interaction.followup.send(embed=embed)
+
 @bot.tree.command(name="icu_canceltime", description="【管理者】自動送信をキャンセル")
-@app_commands.describe(coach="対象コーチ（メンション）")
 @app_commands.checks.has_permissions(manage_guild=True)
 async def icu_canceltime(interaction: discord.Interaction, coach: discord.Member):
     schedule = load_schedule()
@@ -745,8 +1236,11 @@ async def icu_athletes(interaction: discord.Interaction, coach: discord.Member):
     time_str = schedule.get(coach_id, "未設定")
 
     embed = discord.Embed(title=f"👥 {coach.display_name} の登録済み選手一覧", color=0x3399ff)
-    for name, aid in athletes.items():
-        embed.add_field(name=name, value=f"ID: {aid}", inline=True)
+    for name, adata in athletes.items():
+        icu_id = get_athlete_icu_id(adata)
+        discord_id = get_athlete_discord_id(adata)
+        discord_str = f"<@{discord_id}>" if discord_id else "未設定"
+        embed.add_field(name=name, value=f"ICU ID: `{icu_id}`\nDiscord: {discord_str}", inline=True)
     embed.set_footer(text=f"自動送信時刻: {time_str}")
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
