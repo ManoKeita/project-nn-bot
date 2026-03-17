@@ -701,7 +701,11 @@ async def fetch_icu_activity_detail(api_key: str, athlete_id: str, activity_id: 
         async with session.get(url, auth=auth) as resp:
             if resp.status != 200:
                 return {}
-            return await resp.json()
+            data = await resp.json()
+            # APIがlistを返す場合は最初の要素を使用、dictならそのまま
+            if isinstance(data, list):
+                return data[0] if data else {}
+            return data if isinstance(data, dict) else {}
 
 def format_icu_embed(activity: dict, detail: dict, athlete_name: str) -> discord.Embed:
     """Interval.icuデータをEmbedに整形"""
