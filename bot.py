@@ -1,5 +1,5 @@
 import discord
-from discord.ext import commands
+from discord.ext import commands, tasks
 from discord import app_commands
 import json
 import os
@@ -229,7 +229,7 @@ async def process_screenshot(message: discord.Message, attachment: discord.Attac
 
         try:
             seconds = parse_time_to_seconds(result["time"])
-        except:
+        except (ValueError, TypeError):
             seconds = 0
 
         record_date = result.get("date") or datetime.now().strftime("%Y/%m/%d")
@@ -500,9 +500,6 @@ def mark_submitted(athlete_id: str, date: str):
         subs[athlete_id].append(date)
     save_submissions(subs)
 
-def has_submitted(athlete_id: str, date: str) -> bool:
-    subs = load_submissions()
-    return date in subs.get(athlete_id, [])
 
 # ========== 選手情報ヘルパー ==========
 
@@ -995,12 +992,8 @@ async def send_icu_report(bot_instance, coach_id: str, api_key: str, athletes: d
 
 # ========== 定時送信タスク ==========
 
-from discord.ext import tasks
-
 WEEKLY_SCHEDULE_FILE = "icu_weekly_schedule.json"
 WEEKDAY_MAP = {"月": 0, "火": 1, "水": 2, "木": 3, "金": 4, "土": 5, "日": 6}
-WEEKDAY_LABEL = {0: "月", 1: "火", 2: "水", 3: "木", 4: "金", 5: "土", 6: "日"}
-
 def load_weekly_schedule():
     if os.path.exists(WEEKLY_SCHEDULE_FILE):
         with open(WEEKLY_SCHEDULE_FILE, "r", encoding="utf-8") as f:
@@ -1247,7 +1240,7 @@ async def icu_settime(interaction: discord.Interaction, coach: discord.Member, t
     # 時刻フォーマット確認
     try:
         datetime.strptime(time, "%H:%M")
-    except:
+    except ValueError:
         await interaction.response.send_message("❌ 時刻の形式が違います。例: `09:00`", ephemeral=True)
         return
 
@@ -1326,16 +1319,21 @@ async def icu_fatigue(interaction: discord.Interaction, coach: discord.Member,
 @bot.tree.command(name="icu_setweekly", description="【管理者】週次疲労分析レポートの自動送信を設定する")
 @app_commands.describe(
     coach="対象コーチ（メンション）",
-    weekday="送信する曜日（月／火／水／木／金／土／日）",
+    weekday="送信する曜日",
     time="送信時刻（例: 09:00）"
 )
+@app_commands.choices(weekday=[
+    app_commands.Choice(name="月曜日", value="月"),
+    app_commands.Choice(name="火曜日", value="火"),
+    app_commands.Choice(name="水曜日", value="水"),
+    app_commands.Choice(name="木曜日", value="木"),
+    app_commands.Choice(name="金曜日", value="金"),
+    app_commands.Choice(name="土曜日", value="土"),
+    app_commands.Choice(name="日曜日", value="日"),
+])
 @app_commands.checks.has_permissions(manage_guild=True)
 async def icu_setweekly(interaction: discord.Interaction, coach: discord.Member,
-                        weekday: str, time: str):
-    if weekday not in WEEKDAY_MAP:
-        await interaction.response.send_message(
-            "❌ 曜日の形式が違います。月／火／水／木／金／土／日 で指定してください。", ephemeral=True)
-        return
+                        weekday: app_commands.Choice[str], time: str):
     try:
         datetime.strptime(time, "%H:%M")
     except ValueError:
@@ -1343,12 +1341,12 @@ async def icu_setweekly(interaction: discord.Interaction, coach: discord.Member,
         return
 
     weekly = load_weekly_schedule()
-    weekly[str(coach.id)] = {"weekday": WEEKDAY_MAP[weekday], "time": time}
+    weekly[str(coach.id)] = {"weekday": WEEKDAY_MAP[weekday.value], "time": time}
     save_weekly_schedule(weekly)
 
     embed = discord.Embed(title="✅ 週次疲労レポートを設定しました！", color=0x7b2ff7)
     embed.add_field(name="コーチ", value=coach.mention, inline=True)
-    embed.add_field(name="送信タイミング", value=f"毎週**{weekday}曜日** {time}", inline=True)
+    embed.add_field(name="送信タイミング", value=f"毎週**{weekday.name}** {time}", inline=True)
     embed.set_footer(text="全選手の疲労分析レポートがコーチ・選手にDMで届きます")
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
