@@ -997,19 +997,135 @@ async def send_icu_report(bot_instance, coach_id: str, api_key: str, athletes: d
 
 from discord.ext import tasks
 
+WEEKLY_SCHEDULE_FILE = "icu_weekly_schedule.json"
+WEEKDAY_MAP = {"月": 0, "火": 1, "水": 2, "木": 3, "金": 4, "土": 5, "日": 6}
+WEEKDAY_LABEL = {0: "月", 1: "火", 2: "水", 3: "木", 4: "金", 5: "土", 6: "日"}
+
+def load_weekly_schedule():
+    if os.path.exists(WEEKLY_SCHEDULE_FILE):
+        with open(WEEKLY_SCHEDULE_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    return {}
+
+def save_weekly_schedule(data):
+    with open(WEEKLY_SCHEDULE_FILE, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+async def send_weekly_fatigue_report(bot_instance, coach_id: str, api_key: str, athletes: dict):
+    """週次疲労分析レポートをコーチ・選手にDM送信"""
+    coach = bot_instance.get_user(int(coach_id))
+    if not coach:
+        return
+
+    today = datetime.now()
+    oldest_week  = (today - timedelta(days=7)).strftime("%Y-%m-%d")
+    oldest_month = (today - timedelta(days=30)).strftime("%Y-%m-%d")
+    oldest_3m    = (today - timedelta(days=90)).strftime("%Y-%m-%d")
+    base_date    = today.strftime("%Y-%m-%d")
+
+    for athlete_name, athlete_data in athletes.items():
+        icu_id     = get_athlete_icu_id(athlete_data)
+        discord_id = get_athlete_discord_id(athlete_data)
+
+        athlete_user = None
+        if discord_id:
+            try:
+                athlete_user = bot_instance.get_user(int(discord_id)) or await bot_instance.fetch_user(int(discord_id))
+            except Exception:
+                pass
+
+        acts_week  = await fetch_icu_activities_range(api_key, icu_id, oldest_week,  base_date)
+        acts_month = await fetch_icu_activities_range(api_key, icu_id, oldest_month, base_date)
+        acts_3m    = await fetch_icu_activities_range(api_key, icu_id, oldest_3m,    base_date)
+
+        s_w = calc_fatigue_stats(acts_week)
+        s_m = calc_fatigue_stats(acts_month)
+        s_3 = calc_fatigue_stats(acts_3m)
+        warnings = detect_fatigue(s_w, s_m, s_3)
+
+        def stat_row(s: dict) -> str:
+            p = pace_sec_to_str(s.get("avg_pace_sec"))
+            return (
+                f"練習: **{s.get('count',0)}回** ｜ {s.get('total_distance_km',0)}km\n"
+                f"avg HR: {s.get('avg_hr') or '—'} bpm ｜ ペース: {p}/km\n"
+                f"TSS合計: {s.get('total_tss') or '—'} ｜ avg: {s.get('avg_tss') or '—'}"
+            )
+
+        # ── コーチ向けEmbed ──
+        coach_embed = discord.Embed(
+            title=f"📊 週次疲労分析レポート — {athlete_name}",
+            description=f"集計基準日: {base_date}",
+            color=0x7b2ff7,
+            timestamp=datetime.now()
+        )
+        coach_embed.add_field(name="📅 7日間",  value=stat_row(s_w), inline=True)
+        coach_embed.add_field(name="📆 30日間", value=stat_row(s_m), inline=True)
+        coach_embed.add_field(name="📊 90日間", value=stat_row(s_3), inline=True)
+
+        if warnings:
+            coach_embed.add_field(name="⚠️ 疲労シグナル", value="\n".join(warnings), inline=False)
+        else:
+            coach_embed.add_field(name="✅ 疲労シグナル", value="今週は疲労の兆候は検出されませんでした。", inline=False)
+        coach_embed.set_footer(text="PROJECT NN | 週次自動レポート")
+
+        try:
+            await coach.send(content=f"📋 **{athlete_name} の週次疲労分析レポートです**", embed=coach_embed)
+        except Exception:
+            pass
+
+        # ── 選手向けEmbed（警告がある場合のみ送信） ──
+        if athlete_user and warnings:
+            athlete_embed = discord.Embed(
+                title="⚠️ 週次疲労分析レポート",
+                description=f"今週（{oldest_week} 〜 {base_date}）のデータを分析しました。",
+                color=0xff6b35,
+                timestamp=datetime.now()
+            )
+            athlete_embed.add_field(
+                name="📅 今週のサマリー",
+                value=stat_row(s_w),
+                inline=False
+            )
+            athlete_embed.add_field(
+                name="⚠️ 検出された疲労シグナル",
+                value="\n".join(warnings),
+                inline=False
+            )
+            athlete_embed.set_footer(text="無理せず休養も大切にしてください 🙏 | PROJECT NN")
+            try:
+                await athlete_user.send(
+                    content="📩 **今週の疲労分析レポートが届きました**",
+                    embed=athlete_embed
+                )
+            except Exception:
+                pass
+
 @tasks.loop(minutes=1)
 async def icu_scheduler():
-    """毎分チェックして設定時刻に送信"""
-    now = datetime.now().strftime("%H:%M")
-    schedule = load_schedule()
+    """毎分チェックして日次・週次を送信"""
+    now      = datetime.now()
+    now_hm   = now.strftime("%H:%M")
+    weekday  = now.weekday()  # 0=月 〜 6=日
+
+    daily_schedule  = load_schedule()
+    weekly_schedule = load_weekly_schedule()
     icu = load_icu()
 
-    for coach_id, time_str in schedule.items():
-        if time_str == now:
+    # 日次レポート
+    for coach_id, time_str in daily_schedule.items():
+        if time_str == now_hm:
             athletes = icu.get(coach_id, {}).get("athletes", {})
-            api_key = icu.get(coach_id, {}).get("api_key", "")
+            api_key  = icu.get(coach_id, {}).get("api_key", "")
             if api_key and athletes:
                 await send_icu_report(bot, coach_id, api_key, athletes)
+
+    # 週次疲労レポート
+    for coach_id, cfg in weekly_schedule.items():
+        if cfg.get("weekday") == weekday and cfg.get("time") == now_hm:
+            athletes = icu.get(coach_id, {}).get("athletes", {})
+            api_key  = icu.get(coach_id, {}).get("api_key", "")
+            if api_key and athletes:
+                await send_weekly_fatigue_report(bot, coach_id, api_key, athletes)
 
 @bot.listen("on_ready")
 async def start_scheduler():
@@ -1024,11 +1140,11 @@ async def start_scheduler():
     api_key="Interval.icu の APIキー",
     athlete_name="選手の名前",
     athlete_id="選手のInterval.icuアスリートID",
-    athlete_member="選手のDiscordアカウント（メンション）省略可 - DMを送るために必要"
+    athlete_member="選手のDiscordアカウント（メンション）"
 )
 @app_commands.checks.has_permissions(manage_guild=True)
 async def icu_setup(interaction: discord.Interaction, coach: discord.Member, api_key: str,
-                    athlete_name: str, athlete_id: str, athlete_member: discord.Member = None):
+                    athlete_name: str, athlete_id: str, athlete_member: discord.Member):
     icu = load_icu()
     coach_id = str(coach.id)
 
@@ -1036,10 +1152,9 @@ async def icu_setup(interaction: discord.Interaction, coach: discord.Member, api
         icu[coach_id] = {"api_key": api_key, "athletes": {}}
 
     icu[coach_id]["api_key"] = api_key
-    # 選手情報：ICU IDとDiscord IDを辞書で保存（後方互換: 旧形式の文字列も考慮）
     icu[coach_id]["athletes"][athlete_name] = {
         "icu_id": athlete_id,
-        "discord_id": str(athlete_member.id) if athlete_member else None
+        "discord_id": str(athlete_member.id)
     }
     save_icu(icu)
 
@@ -1047,7 +1162,7 @@ async def icu_setup(interaction: discord.Interaction, coach: discord.Member, api
     embed.add_field(name="コーチ", value=coach.mention, inline=True)
     embed.add_field(name="選手名", value=athlete_name, inline=True)
     embed.add_field(name="ICU ID", value=athlete_id, inline=True)
-    embed.add_field(name="Discord", value=athlete_member.mention if athlete_member else "未設定（DMなし）", inline=True)
+    embed.add_field(name="Discord", value=athlete_member.mention, inline=True)
     embed.set_footer(text="/icu_setup を繰り返して選手を追加できます")
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
@@ -1208,6 +1323,48 @@ async def icu_fatigue(interaction: discord.Interaction, coach: discord.Member,
     embed.set_footer(text="Interval.icu データを元に算出")
     await interaction.followup.send(embed=embed)
 
+@bot.tree.command(name="icu_setweekly", description="【管理者】週次疲労分析レポートの自動送信を設定する")
+@app_commands.describe(
+    coach="対象コーチ（メンション）",
+    weekday="送信する曜日（月／火／水／木／金／土／日）",
+    time="送信時刻（例: 09:00）"
+)
+@app_commands.checks.has_permissions(manage_guild=True)
+async def icu_setweekly(interaction: discord.Interaction, coach: discord.Member,
+                        weekday: str, time: str):
+    if weekday not in WEEKDAY_MAP:
+        await interaction.response.send_message(
+            "❌ 曜日の形式が違います。月／火／水／木／金／土／日 で指定してください。", ephemeral=True)
+        return
+    try:
+        datetime.strptime(time, "%H:%M")
+    except ValueError:
+        await interaction.response.send_message("❌ 時刻の形式が違います。例: `09:00`", ephemeral=True)
+        return
+
+    weekly = load_weekly_schedule()
+    weekly[str(coach.id)] = {"weekday": WEEKDAY_MAP[weekday], "time": time}
+    save_weekly_schedule(weekly)
+
+    embed = discord.Embed(title="✅ 週次疲労レポートを設定しました！", color=0x7b2ff7)
+    embed.add_field(name="コーチ", value=coach.mention, inline=True)
+    embed.add_field(name="送信タイミング", value=f"毎週**{weekday}曜日** {time}", inline=True)
+    embed.set_footer(text="全選手の疲労分析レポートがコーチ・選手にDMで届きます")
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+@bot.tree.command(name="icu_cancelweekly", description="【管理者】週次疲労レポートの自動送信をキャンセル")
+@app_commands.describe(coach="対象コーチ（メンション）")
+@app_commands.checks.has_permissions(manage_guild=True)
+async def icu_cancelweekly(interaction: discord.Interaction, coach: discord.Member):
+    weekly = load_weekly_schedule()
+    coach_id = str(coach.id)
+    if coach_id in weekly:
+        del weekly[coach_id]
+        save_weekly_schedule(weekly)
+        await interaction.response.send_message(f"✅ {coach.mention} の週次疲労レポートをキャンセルしました。", ephemeral=True)
+    else:
+        await interaction.response.send_message("❌ 週次疲労レポートは設定されていません。", ephemeral=True)
+
 @bot.tree.command(name="icu_canceltime", description="【管理者】自動送信をキャンセル")
 @app_commands.checks.has_permissions(manage_guild=True)
 async def icu_canceltime(interaction: discord.Interaction, coach: discord.Member):
@@ -1242,6 +1399,48 @@ async def icu_athletes(interaction: discord.Interaction, coach: discord.Member):
         discord_str = f"<@{discord_id}>" if discord_id else "未設定"
         embed.add_field(name=name, value=f"ICU ID: `{icu_id}`\nDiscord: {discord_str}", inline=True)
     embed.set_footer(text=f"自動送信時刻: {time_str}")
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+# ========== Discord ID紐付け ==========
+
+@bot.tree.command(name="icu_link_discord", description="【管理者】選手のDiscordアカウントをICU選手情報に紐付ける")
+@app_commands.describe(
+    coach="対象コーチ（メンション）",
+    athlete_name="選手の名前（/icu_setup で登録済みの名前）",
+    member="選手のDiscordアカウント（メンション）"
+)
+@app_commands.checks.has_permissions(manage_guild=True)
+async def icu_link_discord(interaction: discord.Interaction, coach: discord.Member,
+                           athlete_name: str, member: discord.Member):
+    icu = load_icu()
+    coach_id = str(coach.id)
+
+    if coach_id not in icu:
+        await interaction.response.send_message("❌ コーチが登録されていません。先に `/icu_setup` を実行してください。", ephemeral=True)
+        return
+
+    athletes = icu[coach_id].get("athletes", {})
+    if athlete_name not in athletes:
+        names = "、".join(athletes.keys())
+        await interaction.response.send_message(f"❌ 選手 `{athlete_name}` が見つかりません。登録済み: {names}", ephemeral=True)
+        return
+
+    # 旧形式（文字列）の場合は辞書に変換
+    current = athletes[athlete_name]
+    if isinstance(current, str):
+        icu[coach_id]["athletes"][athlete_name] = {
+            "icu_id": current,
+            "discord_id": str(member.id)
+        }
+    else:
+        icu[coach_id]["athletes"][athlete_name]["discord_id"] = str(member.id)
+
+    save_icu(icu)
+
+    embed = discord.Embed(title="✅ Discord紐付け完了！", color=0x00cc66)
+    embed.add_field(name="選手名", value=athlete_name, inline=True)
+    embed.add_field(name="Discordアカウント", value=member.mention, inline=True)
+    embed.set_footer(text="これで疲労アラート・AIコメント・未提出通知がDMで届きます")
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
 # ========== 起動 ==========
