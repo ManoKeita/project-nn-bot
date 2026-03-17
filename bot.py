@@ -518,7 +518,7 @@ def get_athlete_discord_id(athlete_data) -> str | None:
 # ========== 疲労検知 ==========
 
 async def fetch_icu_activities_range(api_key: str, athlete_id: str, oldest: str, newest: str) -> list:
-    """指定期間のICUデータを取得"""
+    """指定期間のICUデータを取得（ランニングのみ）"""
     url = f"https://intervals.icu/api/v1/athlete/{athlete_id}/activities"
     params = {"oldest": oldest, "newest": newest}
     auth = aiohttp.BasicAuth("API_KEY", api_key)
@@ -526,10 +526,19 @@ async def fetch_icu_activities_range(api_key: str, athlete_id: str, oldest: str,
         async with session.get(url, params=params, auth=auth) as resp:
             if resp.status != 200:
                 return []
-            return await resp.json()
+            data = await resp.json()
+            if not isinstance(data, list):
+                return []
+            # ランニング・自転車のみフィルタ
+            RUN_TYPES  = {"Run", "VirtualRun"}
+            RIDE_TYPES = {"Ride", "VirtualRide", "MountainBikeRide", "GravelRide"}
+            ALLOWED    = RUN_TYPES | RIDE_TYPES
+            return [a for a in data if a.get("type") in ALLOWED or
+                    a.get("sport_type") in ALLOWED or
+                    str(a.get("type", "")).lower() in ("run", "ride")]
 
 def calc_fatigue_stats(activities: list) -> dict:
-    """HR・ペース・TSSから疲労指標を算出"""
+    """HR・ペース・TSSから疲労指標を算出（ランニングのみ想定）"""
     hrs, paces, tss_list, loads = [], [], [], []
     for act in activities:
         hr = act.get("average_heartrate")
@@ -680,7 +689,7 @@ async def generate_ai_comment(athlete_name: str, activity: dict, detail: dict,
         return ""
 
 async def fetch_icu_activities(api_key: str, athlete_id: str, date: str = None) -> list:
-    """Interval.icuから練習データを取得"""
+    """Interval.icuから練習データを取得（ランニングのみ）"""
     if not date:
         date = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
 
@@ -692,7 +701,16 @@ async def fetch_icu_activities(api_key: str, athlete_id: str, date: str = None) 
         async with session.get(url, params=params, auth=auth) as resp:
             if resp.status != 200:
                 return []
-            return await resp.json()
+            data = await resp.json()
+            if not isinstance(data, list):
+                return []
+            # ランニング・自転車のみフィルタ
+            RUN_TYPES  = {"Run", "VirtualRun"}
+            RIDE_TYPES = {"Ride", "VirtualRide", "MountainBikeRide", "GravelRide"}
+            ALLOWED    = RUN_TYPES | RIDE_TYPES
+            return [a for a in data if a.get("type") in ALLOWED or
+                    a.get("sport_type") in ALLOWED or
+                    str(a.get("type", "")).lower() in ("run", "ride")]
 
 async def fetch_icu_activity_detail(api_key: str, athlete_id: str, activity_id: str) -> dict:
     """活動の詳細（ゾーン・負荷）を取得"""
