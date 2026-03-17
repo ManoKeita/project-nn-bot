@@ -532,16 +532,18 @@ def calc_fatigue_stats(activities: list) -> dict:
     """HR・ペース・TSSから疲労指標を算出"""
     hrs, paces, tss_list, loads = [], [], [], []
     for act in activities:
-        if act.get("average_heartrate"):
-            hrs.append(act["average_heartrate"])
-        speed = act.get("average_speed", 0)
-        if speed and act.get("distance", 0):
+        hr = act.get("average_heartrate")
+        if hr is not None:
+            hrs.append(hr)
+        speed = act.get("average_speed") or 0
+        dist = act.get("distance") or 0
+        if speed and dist:
             paces.append(1000 / speed)  # sec/km
         tss = act.get("icu_training_load") or act.get("training_load") or act.get("tss")
-        if tss:
+        if tss is not None:
             tss_list.append(tss)
         load = act.get("icu_rpe_load") or act.get("session_rpe")
-        if load:
+        if load is not None:
             loads.append(load)
 
     return {
@@ -550,7 +552,7 @@ def calc_fatigue_stats(activities: list) -> dict:
         "avg_pace_sec": round(sum(paces) / len(paces), 1) if paces else None,
         "total_tss": round(sum(tss_list), 1) if tss_list else None,
         "avg_tss": round(sum(tss_list) / len(tss_list), 1) if tss_list else None,
-        "total_distance_km": round(sum(act.get("distance", 0) for act in activities) / 1000, 1),
+        "total_distance_km": round(sum(act.get("distance") or 0 for act in activities) / 1000, 1),
     }
 
 def detect_fatigue(week: dict, month: dict, three_month: dict) -> list:
