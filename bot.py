@@ -630,15 +630,17 @@ async def start_scheduler():
 
 # ========== Interval.icu コマンド ==========
 
-@bot.tree.command(name="icu_setup", description="【コーチ】Interval.icu APIキーと選手を登録する")
+@bot.tree.command(name="icu_setup", description="【管理者】Interval.icu APIキー・コーチ・選手を登録する")
 @app_commands.describe(
+    coach="DM送信先のコーチ（メンション）",
     api_key="Interval.icu の APIキー",
     athlete_name="選手の名前",
     athlete_id="選手のInterval.icuアスリートID"
 )
-async def icu_setup(interaction: discord.Interaction, api_key: str, athlete_name: str, athlete_id: str):
+@app_commands.checks.has_permissions(manage_guild=True)
+async def icu_setup(interaction: discord.Interaction, coach: discord.Member, api_key: str, athlete_name: str, athlete_id: str):
     icu = load_icu()
-    coach_id = str(interaction.user.id)
+    coach_id = str(coach.id)
 
     if coach_id not in icu:
         icu[coach_id] = {"api_key": api_key, "athletes": {}}
@@ -648,6 +650,7 @@ async def icu_setup(interaction: discord.Interaction, api_key: str, athlete_name
     save_icu(icu)
 
     embed = discord.Embed(title="✅ Interval.icu 設定完了！", color=0x00cc66)
+    embed.add_field(name="コーチ", value=coach.mention, inline=True)
     embed.add_field(name="選手", value=athlete_name, inline=True)
     embed.add_field(name="アスリートID", value=athlete_id, inline=True)
     embed.set_footer(text="/icu_setup を繰り返して選手を追加できます")
@@ -655,16 +658,17 @@ async def icu_setup(interaction: discord.Interaction, api_key: str, athlete_name
 
 @bot.tree.command(name="icu", description="選手のInterval.icu練習データを取得")
 @app_commands.describe(
+    coach="対象コーチ（省略すると自分）",
     athlete_name="選手の名前",
     date="日付（例: 2026-03-14）省略すると昨日"
 )
-async def icu(interaction: discord.Interaction, athlete_name: str, date: str = None):
+async def icu(interaction: discord.Interaction, athlete_name: str, date: str = None, coach: discord.Member = None):
     await interaction.response.defer()
     icu_data = load_icu()
-    coach_id = str(interaction.user.id)
+    coach_id = str(coach.id) if coach else str(interaction.user.id)
 
     if coach_id not in icu_data:
-        await interaction.followup.send("❌ 先に `/icu_setup` でAPIキーを設定してください。", ephemeral=True)
+        await interaction.followup.send("❌ 先に `/icu_setup` でコーチと選手を登録してください。", ephemeral=True)
         return
 
     api_key = icu_data[coach_id]["api_key"]
@@ -688,9 +692,13 @@ async def icu(interaction: discord.Interaction, athlete_name: str, date: str = N
         embed = format_icu_embed(act, detail, athlete_name)
         await interaction.followup.send(embed=embed)
 
-@bot.tree.command(name="icu_settime", description="【コーチ】Interval.icuレポートの自動送信時刻を設定")
-@app_commands.describe(time="送信時刻（例: 09:00）")
-async def icu_settime(interaction: discord.Interaction, time: str):
+@bot.tree.command(name="icu_settime", description="【管理者】Interval.icuレポートの自動送信時刻を設定")
+@app_commands.describe(
+    coach="対象コーチ（メンション）",
+    time="送信時刻（例: 09:00）"
+)
+@app_commands.checks.has_permissions(manage_guild=True)
+async def icu_settime(interaction: discord.Interaction, coach: discord.Member, time: str):
     # 時刻フォーマット確認
     try:
         datetime.strptime(time, "%H:%M")
@@ -699,39 +707,44 @@ async def icu_settime(interaction: discord.Interaction, time: str):
         return
 
     schedule = load_schedule()
-    schedule[str(interaction.user.id)] = time
+    schedule[str(coach.id)] = time
     save_schedule(schedule)
 
     embed = discord.Embed(title="✅ 自動送信時刻を設定しました！", color=0x00cc66)
+    embed.add_field(name="コーチ", value=coach.mention, inline=True)
     embed.add_field(name="送信時刻", value=f"毎日 **{time}**", inline=True)
     embed.set_footer(text="前日の全選手の練習データがDMに届きます")
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
-@bot.tree.command(name="icu_canceltime", description="【コーチ】自動送信をキャンセル")
-async def icu_canceltime(interaction: discord.Interaction):
+@bot.tree.command(name="icu_canceltime", description="【管理者】自動送信をキャンセル")
+@app_commands.describe(coach="対象コーチ（メンション）")
+@app_commands.checks.has_permissions(manage_guild=True)
+async def icu_canceltime(interaction: discord.Interaction, coach: discord.Member):
     schedule = load_schedule()
-    coach_id = str(interaction.user.id)
+    coach_id = str(coach.id)
     if coach_id in schedule:
         del schedule[coach_id]
         save_schedule(schedule)
-        await interaction.response.send_message("✅ 自動送信をキャンセルしました。", ephemeral=True)
+        await interaction.response.send_message(f"✅ {coach.mention} の自動送信をキャンセルしました。", ephemeral=True)
     else:
         await interaction.response.send_message("❌ 自動送信は設定されていません。", ephemeral=True)
 
-@bot.tree.command(name="icu_athletes", description="【コーチ】登録済み選手一覧を表示")
-async def icu_athletes(interaction: discord.Interaction):
+@bot.tree.command(name="icu_athletes", description="【管理者】登録済み選手一覧を表示")
+@app_commands.describe(coach="対象コーチ（メンション）")
+@app_commands.checks.has_permissions(manage_guild=True)
+async def icu_athletes(interaction: discord.Interaction, coach: discord.Member):
     icu_data = load_icu()
-    coach_id = str(interaction.user.id)
+    coach_id = str(coach.id)
 
     if coach_id not in icu_data or not icu_data[coach_id].get("athletes"):
-        await interaction.response.send_message("📭 選手が登録されていません。`/icu_setup` で登録してください。", ephemeral=True)
+        await interaction.response.send_message(f"📭 {coach.mention} に選手が登録されていません。`/icu_setup` で登録してください。", ephemeral=True)
         return
 
     athletes = icu_data[coach_id]["athletes"]
     schedule = load_schedule()
     time_str = schedule.get(coach_id, "未設定")
 
-    embed = discord.Embed(title="👥 登録済み選手一覧", color=0x3399ff)
+    embed = discord.Embed(title=f"👥 {coach.display_name} の登録済み選手一覧", color=0x3399ff)
     for name, aid in athletes.items():
         embed.add_field(name=name, value=f"ID: {aid}", inline=True)
     embed.set_footer(text=f"自動送信時刻: {time_str}")
