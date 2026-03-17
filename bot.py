@@ -453,8 +453,6 @@ async def myrecords(interaction: discord.Interaction):
                         value=f"⏱ **{r['time']}**{pace_str}{hr_str} 📱{r.get('source','手動')}", inline=False)
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
-bot.run(os.environ["DISCORD_TOKEN"])
-
 # ========== Interval.icu 連携 ==========
 
 ICU_FILE = "icu_settings.json"
@@ -738,3 +736,6 @@ async def icu_athletes(interaction: discord.Interaction):
         embed.add_field(name=name, value=f"ID: {aid}", inline=True)
     embed.set_footer(text=f"自動送信時刻: {time_str}")
     await interaction.response.send_message(embed=embed, ephemeral=True)
+
+# ========== 起動 ==========
+bot.run(os.environ["DISCORD_TOKEN"])
