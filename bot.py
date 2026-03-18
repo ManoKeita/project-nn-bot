@@ -604,8 +604,8 @@ class TermsView(discord.ui.View):
         mark_agreed(self.user_id, self.guild_id, self.user_name)
         for item in self.children:
             item.disabled = True
-        await interaction.message.edit(view=self)
-        await interaction.response.send_message(
+        await interaction.response.edit_message(view=self)
+        await interaction.followup.send(
             "✅ **利用規約に同意しました。PROJECT NN へようこそ！**\n一緒に強くなりましょう！💪",
             ephemeral=True
         )
@@ -617,8 +617,8 @@ class TermsView(discord.ui.View):
             return
         for item in self.children:
             item.disabled = True
-        await interaction.message.edit(view=self)
-        await interaction.response.send_message(
+        await interaction.response.edit_message(view=self)
+        await interaction.followup.send(
             "規約に同意されなかったため、登録はキャンセルされました。\n"
             "参加を希望する場合は管理者までお問い合わせください。",
             ephemeral=True
