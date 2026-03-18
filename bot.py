@@ -5,8 +5,14 @@ import json
 import os
 import base64
 import aiohttp
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import re
+
+JST = timezone(timedelta(hours=9))
+
+def now_jst() -> datetime:
+    """日本時間の現在時刻を返す"""
+    return datetime.now(JST)
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -143,7 +149,7 @@ class ConditionView(discord.ui.View):
                     embed = discord.Embed(
                         title=f"🚨 {self.user_name} の体調が「わるい」です",
                         color=0xff0000,
-                        timestamp=datetime.now()
+                        timestamp=now_jst()
                     )
                     embed.set_author(name=self.user_name)
                     embed.add_field(name="📍 距離", value=f"**{self.result.get('distance_km')} km**", inline=True)
@@ -232,7 +238,7 @@ async def process_screenshot(message: discord.Message, attachment: discord.Attac
         except (ValueError, TypeError):
             seconds = 0
 
-        record_date = result.get("date") or datetime.now().strftime("%Y/%m/%d")
+        record_date = result.get("date") or now_jst().strftime("%Y/%m/%d")
         user_name = message.author.display_name
 
         # データ保存
@@ -256,7 +262,7 @@ async def process_screenshot(message: discord.Message, attachment: discord.Attac
         save_data(data)
 
         # 練習記録Embed
-        embed = discord.Embed(title="✅ 練習記録完了！", color=0x00cc66, timestamp=datetime.now())
+        embed = discord.Embed(title="✅ 練習記録完了！", color=0x00cc66, timestamp=now_jst())
         embed.set_author(name=user_name, icon_url=message.author.display_avatar.url)
         embed.add_field(name="📍 距離", value=f"**{result['distance_km']} km**", inline=True)
         embed.add_field(name="⏱ タイム", value=f"**{result['time']}**", inline=True)
@@ -412,7 +418,7 @@ async def stats(interaction: discord.Interaction, target: discord.Member = None)
         await interaction.response.send_message("📭 記録なし", ephemeral=True)
         return
     records = data[user_id]["records"]
-    today = datetime.now()
+    today = now_jst()
     month_str = today.strftime("%Y/%m")
     week_start = today - timedelta(days=today.weekday())
     monthly = [r for r in records if r["date"].startswith(month_str)]
@@ -691,7 +697,7 @@ async def generate_ai_comment(athlete_name: str, activity: dict, detail: dict,
 async def fetch_icu_activities(api_key: str, athlete_id: str, date: str = None) -> list:
     """Interval.icuから練習データを取得（ランニングのみ）"""
     if not date:
-        date = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
+        date = (now_jst() - timedelta(days=1)).strftime("%Y-%m-%d")
 
     url = f"https://intervals.icu/api/v1/athlete/{athlete_id}/activities"
     params = {"oldest": date, "newest": date}
@@ -736,7 +742,7 @@ def format_icu_embed(activity: dict, detail: dict, athlete_name: str) -> discord
         title=f"📊 {athlete_name} の練習データ",
         description=f"**{name}** — {date}",
         color=0x4361ee,
-        timestamp=datetime.now()
+        timestamp=now_jst()
     )
 
     # 基本データ
@@ -812,7 +818,7 @@ async def send_icu_report(bot_instance, coach_id: str, api_key: str, athletes: d
         return
 
     if not date:
-        date = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
+        date = (now_jst() - timedelta(days=1)).strftime("%Y-%m-%d")
 
     today = datetime.strptime(date, "%Y-%m-%d")
 
@@ -898,7 +904,7 @@ async def send_icu_report(bot_instance, coach_id: str, api_key: str, athletes: d
                         title="⚠️ 疲労検知アラート",
                         description=f"**{date}** のデータを元に疲労の兆候が検出されました。",
                         color=0xff6b35,
-                        timestamp=datetime.now()
+                        timestamp=now_jst()
                     )
                     fatigue_embed.add_field(
                         name="検出された項目",
@@ -938,7 +944,7 @@ async def send_icu_report(bot_instance, coach_id: str, api_key: str, athletes: d
                         title=f"🤖 {date} の練習フィードバック",
                         description=f"**{act.get('name', '練習')}** のデータを元にコメントを生成しました。",
                         color=0x4361ee,
-                        timestamp=datetime.now()
+                        timestamp=now_jst()
                     )
                     # 今日の練習サマリーも添付
                     dist_km = round(act.get("distance", 0) / 1000, 2)
@@ -971,7 +977,7 @@ async def send_icu_report(bot_instance, coach_id: str, api_key: str, athletes: d
             title="🚨 練習未提出アラート",
             description=f"**{date}** の練習データが届いていない選手がいます。",
             color=0xff4444,
-            timestamp=datetime.now()
+            timestamp=now_jst()
         )
         alert_embed.add_field(
             name=f"未提出選手 ({len(no_submit)}名)",
@@ -992,7 +998,7 @@ async def send_icu_report(bot_instance, coach_id: str, api_key: str, athletes: d
                 title="📋 練習記録の未提出のお知らせ",
                 description=f"**{date}** の練習データがまだ Interval.icu に登録されていません。",
                 color=0xff9900,
-                timestamp=datetime.now()
+                timestamp=now_jst()
             )
             athlete_alert.add_field(
                 name="対応をお願いします",
@@ -1034,7 +1040,7 @@ async def send_weekly_fatigue_report(bot_instance, coach_id: str, api_key: str, 
     if not coach:
         return
 
-    today = datetime.now()
+    today = now_jst()
     oldest_week  = (today - timedelta(days=7)).strftime("%Y-%m-%d")
     oldest_month = (today - timedelta(days=30)).strftime("%Y-%m-%d")
     oldest_3m    = (today - timedelta(days=90)).strftime("%Y-%m-%d")
@@ -1073,7 +1079,7 @@ async def send_weekly_fatigue_report(bot_instance, coach_id: str, api_key: str, 
             title=f"📊 週次疲労分析レポート — {athlete_name}",
             description=f"集計基準日: {base_date}",
             color=0x7b2ff7,
-            timestamp=datetime.now()
+            timestamp=now_jst()
         )
         coach_embed.add_field(name="📅 7日間",  value=stat_row(s_w), inline=True)
         coach_embed.add_field(name="📆 30日間", value=stat_row(s_m), inline=True)
@@ -1096,7 +1102,7 @@ async def send_weekly_fatigue_report(bot_instance, coach_id: str, api_key: str, 
                 title="⚠️ 週次疲労分析レポート",
                 description=f"今週（{oldest_week} 〜 {base_date}）のデータを分析しました。",
                 color=0xff6b35,
-                timestamp=datetime.now()
+                timestamp=now_jst()
             )
             athlete_embed.add_field(
                 name="📅 今週のサマリー",
@@ -1120,7 +1126,7 @@ async def send_weekly_fatigue_report(bot_instance, coach_id: str, api_key: str, 
 @tasks.loop(minutes=1)
 async def icu_scheduler():
     """毎分チェックして日次・週次を送信"""
-    now      = datetime.now()
+    now      = now_jst()
     now_hm   = now.strftime("%H:%M")
     weekday  = now.weekday()  # 0=月 〜 6=日
 
@@ -1207,7 +1213,7 @@ async def icu(interaction: discord.Interaction, coach: discord.Member, athlete_n
         return
 
     athlete_id = get_athlete_icu_id(athletes[athlete_name])
-    target_date = date or (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
+    target_date = date or (now_jst() - timedelta(days=1)).strftime("%Y-%m-%d")
 
     activities = await fetch_icu_activities(api_key, athlete_id, target_date)
     if not activities:
@@ -1299,7 +1305,7 @@ async def icu_fatigue(interaction: discord.Interaction, coach: discord.Member,
         return
 
     athlete_id = get_athlete_icu_id(athletes[athlete_name])
-    target_date = date or datetime.now().strftime("%Y-%m-%d")
+    target_date = date or now_jst().strftime("%Y-%m-%d")
     today = datetime.strptime(target_date, "%Y-%m-%d")
 
     oldest_week  = (today - timedelta(days=7)).strftime("%Y-%m-%d")
@@ -1319,7 +1325,7 @@ async def icu_fatigue(interaction: discord.Interaction, coach: discord.Member,
         title=f"🔬 {athlete_name} 疲労分析レポート",
         description=f"基準日: {target_date}",
         color=0xff6b35,
-        timestamp=datetime.now()
+        timestamp=now_jst()
     )
 
     def row(s: dict, label: str) -> str:
