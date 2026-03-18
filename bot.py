@@ -21,7 +21,18 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 
 DATA_FILE = "times.json"
 LINKS_FILE = "links.json"
+PUBLIC_CHANNELS_FILE = "public_channels.json"
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
+
+def load_public_channels():
+    if os.path.exists(PUBLIC_CHANNELS_FILE):
+        with open(PUBLIC_CHANNELS_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    return {}
+
+def save_public_channels(data):
+    with open(PUBLIC_CHANNELS_FILE, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
 
 # ========== データ管理 ==========
 
@@ -200,6 +211,30 @@ async def on_ready():
         print(f"❌ 同期エラー: {e}")
 
 @bot.event
+async def on_member_join(member: discord.Member):
+    """新メンバーが入ったら公開チャンネルに閲覧権限を付与して案内"""
+    pub = load_public_channels()
+    guild_id = str(member.guild.id)
+    channel_ids = pub.get(guild_id, [])
+
+    for ch_id in channel_ids:
+        channel = member.guild.get_channel(int(ch_id))
+        if not channel:
+            continue
+        try:
+            await channel.set_permissions(member, read_messages=True, send_messages=True)
+            await channel.send(
+                f"🎉 **{member.mention} さん、PROJECT NN へようこそ！**\n\n"
+                f"宇宙一アツい、非体育会系チームへの参加、ありがとうございます。\n"
+                f"熱量はどこにも負けないのに、ガチガチの上下関係もない。\n"
+                f"論理的に、自分の頭で考えて走る。\n"
+                f"それがPROJECT NNのスタイルです。\n\n"
+                f"一緒に強くなりましょう！💪"
+            )
+        except Exception:
+            pass
+
+@bot.event
 async def on_message(message: discord.Message):
     if message.author.bot:
         return
@@ -282,6 +317,96 @@ async def process_screenshot(message: discord.Message, attachment: discord.Attac
 
     except Exception as e:
         await msg.edit(content=f"❌ エラー: {str(e)}")
+
+# ========== 公開チャンネル ==========
+
+@bot.tree.command(name="createpublic", description="【管理者】全メンバーが見られる公開チャンネルを作成する")
+@app_commands.describe(
+    channel_name="チャンネル名",
+    category_name="カテゴリ名（省略可）"
+)
+@app_commands.checks.has_permissions(manage_channels=True)
+async def createpublic(interaction: discord.Interaction, channel_name: str, category_name: str = None):
+    await interaction.response.defer()
+    guild = interaction.guild
+
+    # カテゴリ
+    category = None
+    if category_name:
+        category = discord.utils.get(guild.categories, name=category_name)
+        if not category:
+            category = await guild.create_category(category_name)
+
+    # @everyone が読み書きできる権限
+    overwrites = {
+        guild.default_role: discord.PermissionOverwrite(read_messages=True, send_messages=True),
+        guild.me: discord.PermissionOverwrite(read_messages=True, send_messages=True, embed_links=True)
+    }
+
+    channel = await guild.create_text_channel(
+        name=channel_name,
+        category=category,
+        overwrites=overwrites
+    )
+
+    # 公開チャンネルとして登録
+    pub = load_public_channels()
+    guild_id = str(guild.id)
+    if guild_id not in pub:
+        pub[guild_id] = []
+    if str(channel.id) not in pub[guild_id]:
+        pub[guild_id].append(str(channel.id))
+    save_public_channels(pub)
+
+    # 既存メンバー全員に権限付与
+    count = 0
+    for member in guild.members:
+        if member.bot:
+            continue
+        try:
+            await channel.set_permissions(member, read_messages=True, send_messages=True)
+            count += 1
+        except Exception:
+            pass
+
+    embed = discord.Embed(title="✅ 公開チャンネル作成完了！", color=0x00cc66)
+    embed.add_field(name="チャンネル", value=channel.mention, inline=True)
+    embed.add_field(name="権限付与", value=f"{count}名", inline=True)
+    embed.set_footer(text="新メンバーが参加すると自動で閲覧権限が付与されます")
+    await interaction.followup.send(embed=embed)
+
+@bot.tree.command(name="setpublic", description="【管理者】既存チャンネルを新メンバー自動参加チャンネルに設定する")
+@app_commands.describe(channel="対象チャンネル")
+@app_commands.checks.has_permissions(manage_channels=True)
+async def setpublic(interaction: discord.Interaction, channel: discord.TextChannel):
+    pub = load_public_channels()
+    guild_id = str(interaction.guild.id)
+    if guild_id not in pub:
+        pub[guild_id] = []
+    if str(channel.id) not in pub[guild_id]:
+        pub[guild_id].append(str(channel.id))
+        save_public_channels(pub)
+        await interaction.response.send_message(
+            f"✅ {channel.mention} を新メンバー自動参加チャンネルに設定しました。", ephemeral=True)
+    else:
+        await interaction.response.send_message(
+            f"⚠️ {channel.mention} はすでに設定済みです。", ephemeral=True)
+
+@bot.tree.command(name="unsetpublic", description="【管理者】新メンバー自動参加チャンネルの設定を解除する")
+@app_commands.describe(channel="対象チャンネル")
+@app_commands.checks.has_permissions(manage_channels=True)
+async def unsetpublic(interaction: discord.Interaction, channel: discord.TextChannel):
+    pub = load_public_channels()
+    guild_id = str(interaction.guild.id)
+    ch_id = str(channel.id)
+    if ch_id in pub.get(guild_id, []):
+        pub[guild_id].remove(ch_id)
+        save_public_channels(pub)
+        await interaction.response.send_message(
+            f"✅ {channel.mention} の自動参加設定を解除しました。", ephemeral=True)
+    else:
+        await interaction.response.send_message(
+            f"❌ {channel.mention} は設定されていません。", ephemeral=True)
 
 # ========== 個人チャンネル作成 ==========
 
