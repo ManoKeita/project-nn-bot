@@ -22,7 +22,70 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 DATA_FILE = "times.json"
 LINKS_FILE = "links.json"
 PUBLIC_CHANNELS_FILE = "public_channels.json"
+AGREE_FILE = "agreed_members.json"
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
+
+TERMS_TEXT = """**PROJECT NN 利用規約**
+
+**第1条（目的・理念）**
+PROJECT NNは科学的根拠に基づいたトレーニングで競技力向上を目指す非体育会系コーチングチームです。
+
+**第2条（行動規範）**
+・メンバー同士を尊重し、誹謗中傷・ハラスメントを行わないこと
+・論理的・建設的なコミュニケーションを心がけること
+・差別的発言・スパム・他メンバーの個人情報の無断公開を禁止します
+
+**第3条（練習データ・個人情報）**
+・収集データ：練習記録（距離・タイム・ペース・心拍数等）、Interval.icuの活動データ、DiscordユーザーID
+・利用目的：練習管理・コーチへのレポート送信・疲労検知・AIコメント生成のみ
+・第三者への無断提供は行いません
+・退会時のデータ削除は管理者までご連絡ください
+
+**第4条（Botの利用）**
+・Botは正当な目的にのみ使用すること
+・AIコメント・疲労分析は参考情報であり医学的診断ではありません
+
+**第5条（コーチング）**
+・コーチのアドバイスは科学的根拠に基づきますが個人差があります
+・怪我・体調不良時はコーチに速やかに報告してください
+
+**第6条（退会・除名）**
+・退会はいつでも自由です
+・規約違反・他メンバーへの迷惑行為・3ヶ月以上の無連絡の場合、除名することがあります
+
+**第7条（免責事項）**
+・本サービス利用による怪我・健康被害・データ消失について責任を負いません
+・AI機能の完全な正確性を保証するものではありません
+
+**第8条（規約の変更）**
+・規約変更時はサーバー内でアナウンスします
+
+━━━━━━━━━━━━━━━━━
+*PROJECT NN — 宇宙一アツい、非体育会系チーム*"""
+
+def load_agreed():
+    if os.path.exists(AGREE_FILE):
+        with open(AGREE_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    return {}
+
+def save_agreed(data):
+    with open(AGREE_FILE, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+def has_agreed(user_id: str, guild_id: str) -> bool:
+    agreed = load_agreed()
+    return user_id in agreed.get(guild_id, {})
+
+def mark_agreed(user_id: str, guild_id: str, user_name: str):
+    agreed = load_agreed()
+    if guild_id not in agreed:
+        agreed[guild_id] = {}
+    agreed[guild_id][user_id] = {
+        "name": user_name,
+        "agreed_at": now_jst().strftime("%Y/%m/%d %H:%M")
+    }
+    save_agreed(agreed)
 
 def load_public_channels():
     if os.path.exists(PUBLIC_CHANNELS_FILE):
@@ -212,7 +275,7 @@ async def on_ready():
 
 @bot.event
 async def on_member_join(member: discord.Member):
-    """新メンバーが入ったら公開チャンネルに閲覧権限を付与して案内"""
+    """新メンバーが入ったら公開チャンネルにウェルカム→規約を順に送信"""
     pub = load_public_channels()
     guild_id = str(member.guild.id)
     channel_ids = pub.get(guild_id, [])
@@ -223,6 +286,8 @@ async def on_member_join(member: discord.Member):
             continue
         try:
             await channel.set_permissions(member, read_messages=True, send_messages=True)
+
+            # ① ウェルカムメッセージ
             await channel.send(
                 f"🎉 **{member.mention} さん、PROJECT NN へようこそ！**\n\n"
                 f"宇宙一アツい、非体育会系チームへの参加、ありがとうございます。\n"
@@ -230,6 +295,21 @@ async def on_member_join(member: discord.Member):
                 f"論理的に、自分の頭で考えて走る。\n"
                 f"それがPROJECT NNのスタイルです。\n\n"
                 f"一緒に強くなりましょう！💪"
+            )
+
+            # ② 利用規約 ＋ 同意ボタン
+            embed = discord.Embed(
+                title="📋 PROJECT NN 利用規約",
+                description=TERMS_TEXT,
+                color=0x4361ee,
+                timestamp=now_jst()
+            )
+            embed.set_footer(text="下のボタンから規約への同意をお願いします")
+            view = TermsView(str(member.id), guild_id, member.display_name)
+            await channel.send(
+                content=f"{member.mention} 参加前に利用規約をご確認の上、同意をお願いします。",
+                embed=embed,
+                view=view
             )
         except Exception:
             pass
@@ -506,6 +586,100 @@ async def linklist(interaction: discord.Interaction):
 async def resetlinks(interaction: discord.Interaction):
     save_links({})
     await interaction.response.send_message("🗑️ 全リセット完了。`/createroom` で再設定してください。", ephemeral=True)
+
+# ========== 利用規約 ==========
+
+class TermsView(discord.ui.View):
+    def __init__(self, user_id: str, guild_id: str, user_name: str):
+        super().__init__(timeout=600)
+        self.user_id   = user_id
+        self.guild_id  = guild_id
+        self.user_name = user_name
+
+    @discord.ui.button(label="✅ 同意する", style=discord.ButtonStyle.success)
+    async def agree_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if str(interaction.user.id) != self.user_id:
+            await interaction.response.send_message("❌ あなたは押せません。", ephemeral=True)
+            return
+        mark_agreed(self.user_id, self.guild_id, self.user_name)
+        for item in self.children:
+            item.disabled = True
+        await interaction.message.edit(view=self)
+        await interaction.response.send_message(
+            "✅ **利用規約に同意しました。PROJECT NN へようこそ！**\n一緒に強くなりましょう！💪",
+            ephemeral=True
+        )
+
+    @discord.ui.button(label="❌ 同意しない", style=discord.ButtonStyle.danger)
+    async def disagree_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if str(interaction.user.id) != self.user_id:
+            await interaction.response.send_message("❌ あなたは押せません。", ephemeral=True)
+            return
+        for item in self.children:
+            item.disabled = True
+        await interaction.message.edit(view=self)
+        await interaction.response.send_message(
+            "規約に同意されなかったため、登録はキャンセルされました。\n"
+            "参加を希望する場合は管理者までお問い合わせください。",
+            ephemeral=True
+        )
+
+@bot.tree.command(name="terms", description="PROJECT NN 利用規約を表示する")
+async def terms(interaction: discord.Interaction):
+    embed = discord.Embed(
+        title="📋 PROJECT NN 利用規約",
+        description=TERMS_TEXT,
+        color=0x4361ee,
+        timestamp=now_jst()
+    )
+    embed.set_footer(text="同意ボタンを押すと規約に同意したことになります")
+    user_id  = str(interaction.user.id)
+    guild_id = str(interaction.guild_id)
+    if has_agreed(user_id, guild_id):
+        embed.add_field(name="✅ 同意済み", value=f"{interaction.user.display_name} さんは同意済みです", inline=False)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+    else:
+        view = TermsView(user_id, guild_id, interaction.user.display_name)
+        await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+
+@bot.tree.command(name="terms_send", description="【管理者】規約同意フォームをチャンネルに送信する")
+@app_commands.checks.has_permissions(manage_guild=True)
+async def terms_send(interaction: discord.Interaction):
+    """チャンネルに全員向けの規約同意メッセージを投稿する"""
+    embed = discord.Embed(
+        title="📋 PROJECT NN 利用規約",
+        description=TERMS_TEXT,
+        color=0x4361ee,
+        timestamp=now_jst()
+    )
+    embed.set_footer(text="下のボタンから規約への同意をお願いします")
+    await interaction.response.send_message("✅ 規約同意フォームを送信しました。", ephemeral=True)
+    await interaction.channel.send(
+        content="**📌 全メンバーの方へ — 利用規約への同意をお願いします**",
+        embed=embed
+    )
+
+@bot.tree.command(name="agreed_list", description="【管理者】規約同意済みメンバー一覧を表示")
+@app_commands.checks.has_permissions(manage_guild=True)
+async def agreed_list(interaction: discord.Interaction):
+    agreed = load_agreed()
+    guild_id = str(interaction.guild_id)
+    members  = agreed.get(guild_id, {})
+    if not members:
+        await interaction.response.send_message("📭 同意済みメンバーはいません。", ephemeral=True)
+        return
+    embed = discord.Embed(
+        title=f"✅ 規約同意済みメンバー（{len(members)}名）",
+        color=0x00cc66,
+        timestamp=now_jst()
+    )
+    for uid, info in list(members.items())[:25]:
+        embed.add_field(
+            name=info.get("name", uid),
+            value=f"同意日時: {info.get('agreed_at', '不明')}",
+            inline=True
+        )
+    await interaction.response.send_message(embed=embed, ephemeral=True)
 
 @bot.tree.command(name="ranking", description="距離別ベストタイムランキング")
 @app_commands.describe(distance="距離（例: 5km, 10km, ハーフ, フル）")
