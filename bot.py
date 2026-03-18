@@ -272,21 +272,59 @@ async def on_ready():
         print(f"✅ {len(synced)}個のコマンド同期完了")
     except Exception as e:
         print(f"❌ 同期エラー: {e}")
+    # 全サーバーの権限を自動設定
+    for guild in bot.guilds:
+        await setup_guild_permissions(guild)
+        print(f"✅ {guild.name} の権限設定完了")
+
+@bot.tree.command(name="setup_permissions", description="【管理者】サーバーの権限を自動設定する（選手ロール・チャンネル権限）")
+@app_commands.checks.has_permissions(manage_guild=True)
+async def setup_permissions(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=True)
+    await setup_guild_permissions(interaction.guild)
+
+    member_role = discord.utils.get(interaction.guild.roles, name=MEMBER_ROLE_NAME)
+    terms_ch = discord.utils.get(interaction.guild.channels, name=TERMS_CHANNEL_NAME)
+
+    embed = discord.Embed(title="✅ 権限設定完了！", color=0x00cc66, timestamp=now_jst())
+    embed.add_field(name="選手ロール", value=member_role.mention if member_role else "作成済み", inline=True)
+    embed.add_field(name="規約チャンネル", value=terms_ch.mention if terms_ch else f"「{TERMS_CHANNEL_NAME}」が見つかりません", inline=True)
+    embed.add_field(
+        name="設定内容",
+        value="・@everyone → 全チャンネル閲覧不可\n・📜利用条約同意 → 全員閲覧可\n・選手ロール → 全チャンネル解放",
+        inline=False
+    )
+    embed.set_footer(text="新メンバーは同意後に自動で選手ロールが付与されます")
+    await interaction.followup.send(embed=embed, ephemeral=True)
 
 @bot.event
 async def on_member_join(member: discord.Member):
-    """新メンバーが入ったら公開チャンネルにウェルカム→規約を順に送信"""
+    """新メンバー参加時: 未同意ロール付与 → ウェルカム → 規約送信"""
+    guild    = member.guild
+    guild_id = str(guild.id)
+
+    # ── 未同意ロールを付与（なければ作成） ──
+    pending_role = discord.utils.get(guild.roles, name=PENDING_ROLE_NAME)
+    if not pending_role:
+        try:
+            pending_role = await guild.create_role(name=PENDING_ROLE_NAME, reason="利用規約未同意")
+        except Exception:
+            pending_role = None
+    if pending_role:
+        try:
+            await member.add_roles(pending_role, reason="利用規約未同意")
+        except Exception:
+            pass
+
+    # ── 公開チャンネルにウェルカム → 規約 ──
     pub = load_public_channels()
-    guild_id = str(member.guild.id)
     channel_ids = pub.get(guild_id, [])
 
     for ch_id in channel_ids:
-        channel = member.guild.get_channel(int(ch_id))
+        channel = guild.get_channel(int(ch_id))
         if not channel:
             continue
         try:
-            await channel.set_permissions(member, read_messages=True, send_messages=True)
-
             # ① ウェルカムメッセージ
             await channel.send(
                 f"🎉 **{member.mention} さん、PROJECT NN へようこそ！**\n\n"
@@ -304,10 +342,10 @@ async def on_member_join(member: discord.Member):
                 color=0x4361ee,
                 timestamp=now_jst()
             )
-            embed.set_footer(text="下のボタンから規約への同意をお願いします")
+            embed.set_footer(text="✅ 同意するボタンを押すと全チャンネルが解放されます")
             view = TermsView(str(member.id), guild_id, member.display_name)
             await channel.send(
-                content=f"{member.mention} 参加前に利用規約をご確認の上、同意をお願いします。",
+                content=f"{member.mention} **利用規約をご確認の上、同意をお願いします。同意するまでこのチャンネルのみ閲覧できます。**",
                 embed=embed,
                 view=view
             )
@@ -589,19 +627,107 @@ async def resetlinks(interaction: discord.Interaction):
 
 # ========== 利用規約 ==========
 
+PENDING_ROLE_NAME = "未同意"
+MEMBER_ROLE_NAME  = "選手"
+TERMS_CHANNEL_NAME = "📜利用条約同意"
+
+async def setup_guild_permissions(guild: discord.Guild):
+    """
+    サーバーの権限を自動設定:
+    - @everyone: 全チャンネル閲覧・送信OFF
+    - 📜利用条約同意チャンネル: @everyoneに閲覧・送信ON
+    - 選手ロール: 全チャンネル閲覧・送信ON（📜利用条約同意以外）
+    """
+    # 選手ロールを取得or作成
+    member_role = discord.utils.get(guild.roles, name=MEMBER_ROLE_NAME)
+    if not member_role:
+        try:
+            member_role = await guild.create_role(
+                name=MEMBER_ROLE_NAME,
+                color=discord.Color.blue(),
+                reason="PROJECT NN 選手ロール自動作成"
+            )
+        except Exception:
+            return
+
+    # @everyoneのデフォルト権限を最小化
+    try:
+        await guild.default_role.edit(
+            permissions=discord.Permissions(
+                read_messages=False,
+                send_messages=False,
+                read_message_history=False
+            ),
+            reason="利用規約同意システム: @everyone権限を制限"
+        )
+    except Exception:
+        pass
+
+    # 全チャンネルの権限設定
+    for channel in guild.channels:
+        if not isinstance(channel, (discord.TextChannel, discord.VoiceChannel, discord.CategoryChannel)):
+            continue
+        try:
+            if channel.name == TERMS_CHANNEL_NAME or (
+                isinstance(channel, discord.CategoryChannel) and channel.name == TERMS_CHANNEL_NAME
+            ):
+                # 📜利用条約同意チャンネル: @everyoneに閲覧・送信ON
+                await channel.set_permissions(guild.default_role,
+                    read_messages=True, send_messages=False,
+                    read_message_history=True)
+                await channel.set_permissions(member_role,
+                    read_messages=True, send_messages=True)
+            else:
+                # その他のチャンネル: @everyoneはOFF、選手ロールはON
+                await channel.set_permissions(guild.default_role,
+                    read_messages=False, send_messages=False)
+                await channel.set_permissions(member_role,
+                    read_messages=True, send_messages=True)
+        except Exception:
+            pass
+
+
+async def apply_agreed_roles(member: discord.Member):
+    """同意後: 未同意ロール削除 → 選手ロール付与"""
+    guild = member.guild
+
+    # 未同意ロール削除
+    pending_role = discord.utils.get(guild.roles, name=PENDING_ROLE_NAME)
+    if pending_role and pending_role in member.roles:
+        try:
+            await member.remove_roles(pending_role, reason="利用規約同意")
+        except Exception:
+            pass
+
+    # 選手ロール付与（なければ作成）
+    member_role = discord.utils.get(guild.roles, name=MEMBER_ROLE_NAME)
+    if not member_role:
+        try:
+            member_role = await guild.create_role(name=MEMBER_ROLE_NAME, reason="利用規約同意後付与")
+        except Exception:
+            return
+    try:
+        await member.add_roles(member_role, reason="利用規約同意")
+    except Exception:
+        pass
+
 class TermsView(discord.ui.View):
     def __init__(self, user_id: str, guild_id: str, user_name: str):
-        super().__init__(timeout=600)
+        super().__init__(timeout=None)  # タイムアウトなし（既存メンバーも使えるよう）
         self.user_id   = user_id
         self.guild_id  = guild_id
         self.user_name = user_name
 
-    @discord.ui.button(label="✅ 同意する", style=discord.ButtonStyle.success)
+    @discord.ui.button(label="✅ 同意する", style=discord.ButtonStyle.success, custom_id="terms_agree")
     async def agree_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         if str(interaction.user.id) != self.user_id:
             await interaction.response.send_message("❌ あなたは押せません。", ephemeral=True)
             return
         mark_agreed(self.user_id, self.guild_id, self.user_name)
+
+        # ロール切り替え
+        await apply_agreed_roles(interaction.user)
+
         for item in self.children:
             item.disabled = True
         await interaction.response.edit_message(view=self)
@@ -610,7 +736,7 @@ class TermsView(discord.ui.View):
             ephemeral=True
         )
 
-    @discord.ui.button(label="❌ 同意しない", style=discord.ButtonStyle.danger)
+    @discord.ui.button(label="❌ 同意しない", style=discord.ButtonStyle.danger, custom_id="terms_disagree")
     async def disagree_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         if str(interaction.user.id) != self.user_id:
             await interaction.response.send_message("❌ あなたは押せません。", ephemeral=True)
@@ -642,21 +768,64 @@ async def terms(interaction: discord.Interaction):
         view = TermsView(user_id, guild_id, interaction.user.display_name)
         await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
 
-@bot.tree.command(name="terms_send", description="【管理者】規約同意フォームをチャンネルに送信する")
+@bot.tree.command(name="terms_send", description="【管理者】未同意の既存メンバーに規約同意フォームを送信する")
 @app_commands.checks.has_permissions(manage_guild=True)
 async def terms_send(interaction: discord.Interaction):
-    """チャンネルに全員向けの規約同意メッセージを投稿する"""
+    """未同意の既存メンバー全員に未同意ロールを付与し、規約チャンネルに規約を投稿する"""
+    await interaction.response.defer(ephemeral=True)
+    guild    = interaction.guild
+    guild_id = str(guild.id)
+    agreed   = load_agreed().get(guild_id, {})
+
+    # 未同意ロール取得 or 作成
+    pending_role = discord.utils.get(guild.roles, name=PENDING_ROLE_NAME)
+    if not pending_role:
+        try:
+            pending_role = await guild.create_role(name=PENDING_ROLE_NAME, reason="利用規約未同意")
+        except Exception:
+            pending_role = None
+
+    # 未同意メンバーに未同意ロール付与
+    unagreed = [m for m in guild.members if not m.bot and str(m.id) not in agreed]
+    role_count = 0
+    for member in unagreed:
+        if pending_role and pending_role not in member.roles:
+            try:
+                await member.add_roles(pending_role, reason="利用規約未同意（既存メンバー）")
+                role_count += 1
+            except Exception:
+                pass
+
+    # 📜利用条約同意チャンネルに規約+ボタンを投稿
+    terms_ch = discord.utils.get(guild.text_channels, name=TERMS_CHANNEL_NAME)
+    if not terms_ch:
+        await interaction.followup.send(
+            f"❌ 「{TERMS_CHANNEL_NAME}」チャンネルが見つかりません。", ephemeral=True)
+        return
+
+    mentions = " ".join(m.mention for m in unagreed[:20])
     embed = discord.Embed(
         title="📋 PROJECT NN 利用規約",
         description=TERMS_TEXT,
         color=0x4361ee,
         timestamp=now_jst()
     )
-    embed.set_footer(text="下のボタンから規約への同意をお願いします")
-    await interaction.response.send_message("✅ 規約同意フォームを送信しました。", ephemeral=True)
-    await interaction.channel.send(
-        content="**📌 全メンバーの方へ — 利用規約への同意をお願いします**",
-        embed=embed
+    embed.set_footer(text="✅ 同意するボタンを押すと全チャンネルが解放されます")
+
+    for member in unagreed:
+        view = TermsView(str(member.id), guild_id, member.display_name)
+        try:
+            await terms_ch.send(
+                content=f"{member.mention} **利用規約をご確認の上、同意をお願いします。**",
+                embed=embed,
+                view=view
+            )
+        except Exception:
+            pass
+
+    await interaction.followup.send(
+        f"✅ 未同意メンバー {len(unagreed)}名 に規約を送信しました。",
+        ephemeral=True
     )
 
 @bot.tree.command(name="agreed_list", description="【管理者】規約同意済みメンバー一覧を表示")
