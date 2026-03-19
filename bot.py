@@ -1,18 +1,12 @@
 import discord
-from discord.ext import commands, tasks
+from discord.ext import commands
 from discord import app_commands
 import json
 import os
 import base64
 import aiohttp
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 import re
-
-JST = timezone(timedelta(hours=9))
-
-def now_jst() -> datetime:
-    """日本時間の現在時刻を返す"""
-    return datetime.now(JST)
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -21,81 +15,7 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 
 DATA_FILE = "times.json"
 LINKS_FILE = "links.json"
-PUBLIC_CHANNELS_FILE = "public_channels.json"
-AGREE_FILE = "agreed_members.json"
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
-
-TERMS_TEXT = """**PROJECT NN 利用規約**
-
-**第1条（目的・理念）**
-PROJECT NNは科学的根拠に基づいたトレーニングで競技力向上を目指す非体育会系コーチングチームです。
-
-**第2条（行動規範）**
-・メンバー同士を尊重し、誹謗中傷・ハラスメントを行わないこと
-・論理的・建設的なコミュニケーションを心がけること
-・差別的発言・スパム・他メンバーの個人情報の無断公開を禁止します
-
-**第3条（練習データ・個人情報）**
-・収集データ：練習記録（距離・タイム・ペース・心拍数等）、Interval.icuの活動データ、DiscordユーザーID
-・利用目的：練習管理・コーチへのレポート送信・疲労検知・AIコメント生成のみ
-・第三者への無断提供は行いません
-・退会時のデータ削除は管理者までご連絡ください
-
-**第4条（Botの利用）**
-・Botは正当な目的にのみ使用すること
-・AIコメント・疲労分析は参考情報であり医学的診断ではありません
-
-**第5条（コーチング）**
-・コーチのアドバイスは科学的根拠に基づきますが個人差があります
-・怪我・体調不良時はコーチに速やかに報告してください
-
-**第6条（退会・除名）**
-・退会はいつでも自由です
-・規約違反・他メンバーへの迷惑行為・3ヶ月以上の無連絡の場合、除名することがあります
-
-**第7条（免責事項）**
-・本サービス利用による怪我・健康被害・データ消失について責任を負いません
-・AI機能の完全な正確性を保証するものではありません
-
-**第8条（規約の変更）**
-・規約変更時はサーバー内でアナウンスします
-
-━━━━━━━━━━━━━━━━━
-*PROJECT NN — 宇宙一アツい、非体育会系チーム*"""
-
-def load_agreed():
-    if os.path.exists(AGREE_FILE):
-        with open(AGREE_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
-    return {}
-
-def save_agreed(data):
-    with open(AGREE_FILE, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
-
-def has_agreed(user_id: str, guild_id: str) -> bool:
-    agreed = load_agreed()
-    return user_id in agreed.get(guild_id, {})
-
-def mark_agreed(user_id: str, guild_id: str, user_name: str):
-    agreed = load_agreed()
-    if guild_id not in agreed:
-        agreed[guild_id] = {}
-    agreed[guild_id][user_id] = {
-        "name": user_name,
-        "agreed_at": now_jst().strftime("%Y/%m/%d %H:%M")
-    }
-    save_agreed(agreed)
-
-def load_public_channels():
-    if os.path.exists(PUBLIC_CHANNELS_FILE):
-        with open(PUBLIC_CHANNELS_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
-    return {}
-
-def save_public_channels(data):
-    with open(PUBLIC_CHANNELS_FILE, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
 
 # ========== データ管理 ==========
 
@@ -223,7 +143,7 @@ class ConditionView(discord.ui.View):
                     embed = discord.Embed(
                         title=f"🚨 {self.user_name} の体調が「わるい」です",
                         color=0xff0000,
-                        timestamp=now_jst()
+                        timestamp=datetime.now()
                     )
                     embed.set_author(name=self.user_name)
                     embed.add_field(name="📍 距離", value=f"**{self.result.get('distance_km')} km**", inline=True)
@@ -272,85 +192,6 @@ async def on_ready():
         print(f"✅ {len(synced)}個のコマンド同期完了")
     except Exception as e:
         print(f"❌ 同期エラー: {e}")
-    # 全サーバーの権限を自動設定
-    for guild in bot.guilds:
-        await setup_guild_permissions(guild)
-        print(f"✅ {guild.name} の権限設定完了")
-
-@bot.tree.command(name="setup_permissions", description="【管理者】サーバーの権限を自動設定する（選手ロール・チャンネル権限）")
-@app_commands.checks.has_permissions(manage_guild=True)
-async def setup_permissions(interaction: discord.Interaction):
-    await interaction.response.defer(ephemeral=True)
-    await setup_guild_permissions(interaction.guild)
-
-    member_role = discord.utils.get(interaction.guild.roles, name=MEMBER_ROLE_NAME)
-    terms_ch = discord.utils.get(interaction.guild.channels, name=TERMS_CHANNEL_NAME)
-
-    embed = discord.Embed(title="✅ 権限設定完了！", color=0x00cc66, timestamp=now_jst())
-    embed.add_field(name="選手ロール", value=member_role.mention if member_role else "作成済み", inline=True)
-    embed.add_field(name="規約チャンネル", value=terms_ch.mention if terms_ch else f"「{TERMS_CHANNEL_NAME}」が見つかりません", inline=True)
-    embed.add_field(
-        name="設定内容",
-        value="・@everyone → 全チャンネル閲覧不可\n・📜利用条約同意 → 全員閲覧可\n・選手ロール → 全チャンネル解放",
-        inline=False
-    )
-    embed.set_footer(text="新メンバーは同意後に自動で選手ロールが付与されます")
-    await interaction.followup.send(embed=embed, ephemeral=True)
-
-@bot.event
-async def on_member_join(member: discord.Member):
-    """新メンバー参加時: 未同意ロール付与 → ウェルカム → 規約送信"""
-    guild    = member.guild
-    guild_id = str(guild.id)
-
-    # ── 未同意ロールを付与（なければ作成） ──
-    pending_role = discord.utils.get(guild.roles, name=PENDING_ROLE_NAME)
-    if not pending_role:
-        try:
-            pending_role = await guild.create_role(name=PENDING_ROLE_NAME, reason="利用規約未同意")
-        except Exception:
-            pending_role = None
-    if pending_role:
-        try:
-            await member.add_roles(pending_role, reason="利用規約未同意")
-        except Exception:
-            pass
-
-    # ── 公開チャンネルにウェルカム → 規約 ──
-    pub = load_public_channels()
-    channel_ids = pub.get(guild_id, [])
-
-    for ch_id in channel_ids:
-        channel = guild.get_channel(int(ch_id))
-        if not channel:
-            continue
-        try:
-            # ① ウェルカムメッセージ
-            await channel.send(
-                f"🎉 **{member.mention} さん、PROJECT NN へようこそ！**\n\n"
-                f"宇宙一アツい、非体育会系チームへの参加、ありがとうございます。\n"
-                f"熱量はどこにも負けないのに、ガチガチの上下関係もない。\n"
-                f"論理的に、自分の頭で考えて走る。\n"
-                f"それがPROJECT NNのスタイルです。\n\n"
-                f"一緒に強くなりましょう！💪"
-            )
-
-            # ② 利用規約 ＋ 同意ボタン
-            embed = discord.Embed(
-                title="📋 PROJECT NN 利用規約",
-                description=TERMS_TEXT,
-                color=0x4361ee,
-                timestamp=now_jst()
-            )
-            embed.set_footer(text="✅ 同意するボタンを押すと全チャンネルが解放されます")
-            view = TermsView(str(member.id), guild_id, member.display_name)
-            await channel.send(
-                content=f"{member.mention} **利用規約をご確認の上、同意をお願いします。同意するまでこのチャンネルのみ閲覧できます。**",
-                embed=embed,
-                view=view
-            )
-        except Exception:
-            pass
 
 @bot.event
 async def on_message(message: discord.Message):
@@ -388,10 +229,10 @@ async def process_screenshot(message: discord.Message, attachment: discord.Attac
 
         try:
             seconds = parse_time_to_seconds(result["time"])
-        except (ValueError, TypeError):
+        except:
             seconds = 0
 
-        record_date = result.get("date") or now_jst().strftime("%Y/%m/%d")
+        record_date = result.get("date") or datetime.now().strftime("%Y/%m/%d")
         user_name = message.author.display_name
 
         # データ保存
@@ -415,7 +256,7 @@ async def process_screenshot(message: discord.Message, attachment: discord.Attac
         save_data(data)
 
         # 練習記録Embed
-        embed = discord.Embed(title="✅ 練習記録完了！", color=0x00cc66, timestamp=now_jst())
+        embed = discord.Embed(title="✅ 練習記録完了！", color=0x00cc66, timestamp=datetime.now())
         embed.set_author(name=user_name, icon_url=message.author.display_avatar.url)
         embed.add_field(name="📍 距離", value=f"**{result['distance_km']} km**", inline=True)
         embed.add_field(name="⏱ タイム", value=f"**{result['time']}**", inline=True)
@@ -436,96 +277,6 @@ async def process_screenshot(message: discord.Message, attachment: discord.Attac
     except Exception as e:
         await msg.edit(content=f"❌ エラー: {str(e)}")
 
-# ========== 公開チャンネル ==========
-
-@bot.tree.command(name="createpublic", description="【管理者】全メンバーが見られる公開チャンネルを作成する")
-@app_commands.describe(
-    channel_name="チャンネル名",
-    category_name="カテゴリ名（省略可）"
-)
-@app_commands.checks.has_permissions(manage_channels=True)
-async def createpublic(interaction: discord.Interaction, channel_name: str, category_name: str = None):
-    await interaction.response.defer()
-    guild = interaction.guild
-
-    # カテゴリ
-    category = None
-    if category_name:
-        category = discord.utils.get(guild.categories, name=category_name)
-        if not category:
-            category = await guild.create_category(category_name)
-
-    # @everyone が読み書きできる権限
-    overwrites = {
-        guild.default_role: discord.PermissionOverwrite(read_messages=True, send_messages=True),
-        guild.me: discord.PermissionOverwrite(read_messages=True, send_messages=True, embed_links=True)
-    }
-
-    channel = await guild.create_text_channel(
-        name=channel_name,
-        category=category,
-        overwrites=overwrites
-    )
-
-    # 公開チャンネルとして登録
-    pub = load_public_channels()
-    guild_id = str(guild.id)
-    if guild_id not in pub:
-        pub[guild_id] = []
-    if str(channel.id) not in pub[guild_id]:
-        pub[guild_id].append(str(channel.id))
-    save_public_channels(pub)
-
-    # 既存メンバー全員に権限付与
-    count = 0
-    for member in guild.members:
-        if member.bot:
-            continue
-        try:
-            await channel.set_permissions(member, read_messages=True, send_messages=True)
-            count += 1
-        except Exception:
-            pass
-
-    embed = discord.Embed(title="✅ 公開チャンネル作成完了！", color=0x00cc66)
-    embed.add_field(name="チャンネル", value=channel.mention, inline=True)
-    embed.add_field(name="権限付与", value=f"{count}名", inline=True)
-    embed.set_footer(text="新メンバーが参加すると自動で閲覧権限が付与されます")
-    await interaction.followup.send(embed=embed)
-
-@bot.tree.command(name="setpublic", description="【管理者】既存チャンネルを新メンバー自動参加チャンネルに設定する")
-@app_commands.describe(channel="対象チャンネル")
-@app_commands.checks.has_permissions(manage_channels=True)
-async def setpublic(interaction: discord.Interaction, channel: discord.TextChannel):
-    pub = load_public_channels()
-    guild_id = str(interaction.guild.id)
-    if guild_id not in pub:
-        pub[guild_id] = []
-    if str(channel.id) not in pub[guild_id]:
-        pub[guild_id].append(str(channel.id))
-        save_public_channels(pub)
-        await interaction.response.send_message(
-            f"✅ {channel.mention} を新メンバー自動参加チャンネルに設定しました。", ephemeral=True)
-    else:
-        await interaction.response.send_message(
-            f"⚠️ {channel.mention} はすでに設定済みです。", ephemeral=True)
-
-@bot.tree.command(name="unsetpublic", description="【管理者】新メンバー自動参加チャンネルの設定を解除する")
-@app_commands.describe(channel="対象チャンネル")
-@app_commands.checks.has_permissions(manage_channels=True)
-async def unsetpublic(interaction: discord.Interaction, channel: discord.TextChannel):
-    pub = load_public_channels()
-    guild_id = str(interaction.guild.id)
-    ch_id = str(channel.id)
-    if ch_id in pub.get(guild_id, []):
-        pub[guild_id].remove(ch_id)
-        save_public_channels(pub)
-        await interaction.response.send_message(
-            f"✅ {channel.mention} の自動参加設定を解除しました。", ephemeral=True)
-    else:
-        await interaction.response.send_message(
-            f"❌ {channel.mention} は設定されていません。", ephemeral=True)
-
 # ========== 個人チャンネル作成 ==========
 
 @bot.tree.command(name="createroom", description="【管理者】選手の個人練習チャンネルを作成する")
@@ -538,33 +289,39 @@ async def createroom(interaction: discord.Interaction, member: discord.Member, c
     await interaction.response.defer()
     guild = interaction.guild
 
-    # カテゴリを探す or 作成
+    # カテゴリを探す（作成しない）
     category = discord.utils.get(guild.categories, name="練習ログ")
-    if not category:
-        category = await guild.create_category("練習ログ")
 
-    # チャンネル名
-    channel_name = f"📋{member.display_name}"
+    # チャンネル名（シンプルに）
+    channel_name = f"log-{member.display_name.lower().replace(chr(32), chr(45))}"
 
     # 既存チェック
-    existing = discord.utils.get(guild.text_channels, name=channel_name.lower().replace(" ", "-"))
+    existing = discord.utils.get(guild.text_channels, name=channel_name)
     if existing:
         await interaction.followup.send(f"⚠️ {member.mention} のチャンネルは既に存在します: {existing.mention}")
         return
 
-    # 権限設定（選手とBotのみ）
+    # 権限設定
     overwrites = {
         guild.default_role: discord.PermissionOverwrite(read_messages=False),
-        member: discord.PermissionOverwrite(read_messages=True, send_messages=True),
-        guild.me: discord.PermissionOverwrite(read_messages=True, send_messages=True, embed_links=True, attach_files=True)
+        member: discord.PermissionOverwrite(read_messages=True, send_messages=True, attach_files=True),
+        guild.me: discord.PermissionOverwrite(read_messages=True, send_messages=True, embed_links=True, attach_files=True, manage_messages=True)
     }
 
-    channel = await guild.create_text_channel(
-        name=channel_name,
-        category=category,
-        overwrites=overwrites,
-        topic=f"{member.display_name} の練習ログチャンネル"
-    )
+    try:
+        channel = await guild.create_text_channel(
+            name=channel_name,
+            category=category,
+            overwrites=overwrites,
+            topic=f"{member.display_name} の練習ログチャンネル"
+        )
+    except discord.Forbidden:
+        await interaction.followup.send(
+            "❌ チャンネル作成に失敗しました。
+Discordのサーバー設定 → ロール → RunBot → 管理者をON にしてください。",
+            ephemeral=True
+        )
+        return
 
     # 紐付け保存
     links = load_links()
@@ -625,231 +382,6 @@ async def resetlinks(interaction: discord.Interaction):
     save_links({})
     await interaction.response.send_message("🗑️ 全リセット完了。`/createroom` で再設定してください。", ephemeral=True)
 
-# ========== 利用規約 ==========
-
-PENDING_ROLE_NAME = "未同意"
-MEMBER_ROLE_NAME  = "選手"
-TERMS_CHANNEL_NAME = "📜利用条約同意"
-
-async def setup_guild_permissions(guild: discord.Guild):
-    """
-    サーバーの権限を自動設定:
-    - @everyone: 全チャンネル閲覧・送信OFF
-    - 📜利用条約同意チャンネル: @everyoneに閲覧・送信ON
-    - 選手ロール: 全チャンネル閲覧・送信ON（📜利用条約同意以外）
-    """
-    # 選手ロールを取得or作成
-    member_role = discord.utils.get(guild.roles, name=MEMBER_ROLE_NAME)
-    if not member_role:
-        try:
-            member_role = await guild.create_role(
-                name=MEMBER_ROLE_NAME,
-                color=discord.Color.blue(),
-                reason="PROJECT NN 選手ロール自動作成"
-            )
-        except Exception:
-            return
-
-    # @everyoneのデフォルト権限を最小化
-    try:
-        await guild.default_role.edit(
-            permissions=discord.Permissions(
-                read_messages=False,
-                send_messages=False,
-                read_message_history=False
-            ),
-            reason="利用規約同意システム: @everyone権限を制限"
-        )
-    except Exception:
-        pass
-
-    # 全チャンネルの権限設定
-    for channel in guild.channels:
-        if not isinstance(channel, (discord.TextChannel, discord.VoiceChannel, discord.CategoryChannel)):
-            continue
-        try:
-            if channel.name == TERMS_CHANNEL_NAME or (
-                isinstance(channel, discord.CategoryChannel) and channel.name == TERMS_CHANNEL_NAME
-            ):
-                # 📜利用条約同意チャンネル: @everyoneに閲覧・送信ON
-                await channel.set_permissions(guild.default_role,
-                    read_messages=True, send_messages=False,
-                    read_message_history=True)
-                await channel.set_permissions(member_role,
-                    read_messages=True, send_messages=True)
-            else:
-                # その他のチャンネル: @everyoneはOFF、選手ロールはON
-                await channel.set_permissions(guild.default_role,
-                    read_messages=False, send_messages=False)
-                await channel.set_permissions(member_role,
-                    read_messages=True, send_messages=True)
-        except Exception:
-            pass
-
-
-async def apply_agreed_roles(member: discord.Member):
-    """同意後: 未同意ロール削除 → 選手ロール付与"""
-    guild = member.guild
-
-    # 未同意ロール削除
-    pending_role = discord.utils.get(guild.roles, name=PENDING_ROLE_NAME)
-    if pending_role and pending_role in member.roles:
-        try:
-            await member.remove_roles(pending_role, reason="利用規約同意")
-        except Exception:
-            pass
-
-    # 選手ロール付与（なければ作成）
-    member_role = discord.utils.get(guild.roles, name=MEMBER_ROLE_NAME)
-    if not member_role:
-        try:
-            member_role = await guild.create_role(name=MEMBER_ROLE_NAME, reason="利用規約同意後付与")
-        except Exception:
-            return
-    try:
-        await member.add_roles(member_role, reason="利用規約同意")
-    except Exception:
-        pass
-
-class TermsView(discord.ui.View):
-    def __init__(self, user_id: str, guild_id: str, user_name: str):
-        super().__init__(timeout=None)  # タイムアウトなし（既存メンバーも使えるよう）
-        self.user_id   = user_id
-        self.guild_id  = guild_id
-        self.user_name = user_name
-
-    @discord.ui.button(label="✅ 同意する", style=discord.ButtonStyle.success, custom_id="terms_agree")
-    async def agree_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if str(interaction.user.id) != self.user_id:
-            await interaction.response.send_message("❌ あなたは押せません。", ephemeral=True)
-            return
-        mark_agreed(self.user_id, self.guild_id, self.user_name)
-
-        # ロール切り替え
-        await apply_agreed_roles(interaction.user)
-
-        for item in self.children:
-            item.disabled = True
-        await interaction.response.edit_message(view=self)
-        await interaction.followup.send(
-            "✅ **利用規約に同意しました。PROJECT NN へようこそ！**\n一緒に強くなりましょう！💪",
-            ephemeral=True
-        )
-
-    @discord.ui.button(label="❌ 同意しない", style=discord.ButtonStyle.danger, custom_id="terms_disagree")
-    async def disagree_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if str(interaction.user.id) != self.user_id:
-            await interaction.response.send_message("❌ あなたは押せません。", ephemeral=True)
-            return
-        for item in self.children:
-            item.disabled = True
-        await interaction.response.edit_message(view=self)
-        await interaction.followup.send(
-            "規約に同意されなかったため、登録はキャンセルされました。\n"
-            "参加を希望する場合は管理者までお問い合わせください。",
-            ephemeral=True
-        )
-
-@bot.tree.command(name="terms", description="PROJECT NN 利用規約を表示する")
-async def terms(interaction: discord.Interaction):
-    embed = discord.Embed(
-        title="📋 PROJECT NN 利用規約",
-        description=TERMS_TEXT,
-        color=0x4361ee,
-        timestamp=now_jst()
-    )
-    embed.set_footer(text="同意ボタンを押すと規約に同意したことになります")
-    user_id  = str(interaction.user.id)
-    guild_id = str(interaction.guild_id)
-    if has_agreed(user_id, guild_id):
-        embed.add_field(name="✅ 同意済み", value=f"{interaction.user.display_name} さんは同意済みです", inline=False)
-        await interaction.response.send_message(embed=embed, ephemeral=True)
-    else:
-        view = TermsView(user_id, guild_id, interaction.user.display_name)
-        await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
-
-@bot.tree.command(name="terms_send", description="【管理者】未同意の既存メンバーに規約同意フォームを送信する")
-@app_commands.checks.has_permissions(manage_guild=True)
-async def terms_send(interaction: discord.Interaction):
-    """未同意の既存メンバー全員に未同意ロールを付与し、規約チャンネルに規約を投稿する"""
-    await interaction.response.defer(ephemeral=True)
-    guild    = interaction.guild
-    guild_id = str(guild.id)
-    agreed   = load_agreed().get(guild_id, {})
-
-    # 未同意ロール取得 or 作成
-    pending_role = discord.utils.get(guild.roles, name=PENDING_ROLE_NAME)
-    if not pending_role:
-        try:
-            pending_role = await guild.create_role(name=PENDING_ROLE_NAME, reason="利用規約未同意")
-        except Exception:
-            pending_role = None
-
-    # 未同意メンバーに未同意ロール付与
-    unagreed = [m for m in guild.members if not m.bot and str(m.id) not in agreed]
-    role_count = 0
-    for member in unagreed:
-        if pending_role and pending_role not in member.roles:
-            try:
-                await member.add_roles(pending_role, reason="利用規約未同意（既存メンバー）")
-                role_count += 1
-            except Exception:
-                pass
-
-    # 📜利用条約同意チャンネルに規約+ボタンを投稿
-    terms_ch = discord.utils.get(guild.text_channels, name=TERMS_CHANNEL_NAME)
-    if not terms_ch:
-        await interaction.followup.send(
-            f"❌ 「{TERMS_CHANNEL_NAME}」チャンネルが見つかりません。", ephemeral=True)
-        return
-
-    mentions = " ".join(m.mention for m in unagreed[:20])
-    embed = discord.Embed(
-        title="📋 PROJECT NN 利用規約",
-        description=TERMS_TEXT,
-        color=0x4361ee,
-        timestamp=now_jst()
-    )
-    embed.set_footer(text="✅ 同意するボタンを押すと全チャンネルが解放されます")
-
-    for member in unagreed:
-        view = TermsView(str(member.id), guild_id, member.display_name)
-        try:
-            await terms_ch.send(
-                content=f"{member.mention} **利用規約をご確認の上、同意をお願いします。**",
-                embed=embed,
-                view=view
-            )
-        except Exception:
-            pass
-
-    await interaction.followup.send(
-        f"✅ 未同意メンバー {len(unagreed)}名 に規約を送信しました。",
-        ephemeral=True
-    )
-
-@bot.tree.command(name="agreed_list", description="【管理者】規約同意済みメンバー一覧を表示")
-@app_commands.checks.has_permissions(manage_guild=True)
-async def agreed_list(interaction: discord.Interaction):
-    agreed = load_agreed()
-    guild_id = str(interaction.guild_id)
-    members  = agreed.get(guild_id, {})
-    if not members:
-        await interaction.response.send_message("📭 同意済みメンバーはいません。", ephemeral=True)
-        return
-    embed = discord.Embed(
-        title=f"✅ 規約同意済みメンバー（{len(members)}名）",
-        color=0x00cc66,
-        timestamp=now_jst()
-    )
-    for uid, info in list(members.items())[:25]:
-        embed.add_field(
-            name=info.get("name", uid),
-            value=f"同意日時: {info.get('agreed_at', '不明')}",
-            inline=True
-        )
-    await interaction.response.send_message(embed=embed, ephemeral=True)
-
 @bot.tree.command(name="ranking", description="距離別ベストタイムランキング")
 @app_commands.describe(distance="距離（例: 5km, 10km, ハーフ, フル）")
 async def ranking(interaction: discord.Interaction, distance: str):
@@ -886,7 +418,7 @@ async def stats(interaction: discord.Interaction, target: discord.Member = None)
         await interaction.response.send_message("📭 記録なし", ephemeral=True)
         return
     records = data[user_id]["records"]
-    today = now_jst()
+    today = datetime.now()
     month_str = today.strftime("%Y/%m")
     week_start = today - timedelta(days=today.weekday())
     monthly = [r for r in records if r["date"].startswith(month_str)]
@@ -927,11 +459,12 @@ async def myrecords(interaction: discord.Interaction):
                         value=f"⏱ **{r['time']}**{pace_str}{hr_str} 📱{r.get('source','手動')}", inline=False)
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
+bot.run(os.environ["DISCORD_TOKEN"])
+
 # ========== Interval.icu 連携 ==========
 
 ICU_FILE = "icu_settings.json"
 SCHEDULE_FILE = "icu_schedule.json"
-SUBMISSION_FILE = "submissions.json"  # 提出済み記録
 
 def load_icu():
     if os.path.exists(ICU_FILE):
@@ -953,219 +486,10 @@ def save_schedule(data):
     with open(SCHEDULE_FILE, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
 
-# ========== 提出管理 ==========
-
-def load_submissions():
-    if os.path.exists(SUBMISSION_FILE):
-        with open(SUBMISSION_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
-    return {}
-
-def save_submissions(data):
-    with open(SUBMISSION_FILE, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
-
-def mark_submitted(athlete_id: str, date: str):
-    """指定日に提出済みとしてマーク"""
-    subs = load_submissions()
-    if athlete_id not in subs:
-        subs[athlete_id] = []
-    if date not in subs[athlete_id]:
-        subs[athlete_id].append(date)
-    save_submissions(subs)
-
-
-# ========== 選手情報ヘルパー ==========
-
-def get_athlete_icu_id(athlete_data) -> str:
-    """新旧両形式からICU IDを返す"""
-    if isinstance(athlete_data, dict):
-        return athlete_data.get("icu_id", "")
-    return athlete_data  # 旧形式: 文字列
-
-def get_athlete_discord_id(athlete_data) -> str | None:
-    """新形式からDiscord IDを返す（旧形式はNone）"""
-    if isinstance(athlete_data, dict):
-        return athlete_data.get("discord_id")
-    return None
-
-# ========== 疲労検知 ==========
-
-async def fetch_icu_activities_range(api_key: str, athlete_id: str, oldest: str, newest: str) -> list:
-    """指定期間のICUデータを取得（ランニングのみ）"""
-    url = f"https://intervals.icu/api/v1/athlete/{athlete_id}/activities"
-    params = {"oldest": oldest, "newest": newest}
-    auth = aiohttp.BasicAuth("API_KEY", api_key)
-    async with aiohttp.ClientSession() as session:
-        async with session.get(url, params=params, auth=auth) as resp:
-            if resp.status != 200:
-                return []
-            data = await resp.json()
-            if not isinstance(data, list):
-                return []
-            # ランニング・自転車のみフィルタ
-            RUN_TYPES  = {"Run", "VirtualRun"}
-            RIDE_TYPES = {"Ride", "VirtualRide", "MountainBikeRide", "GravelRide"}
-            ALLOWED    = RUN_TYPES | RIDE_TYPES
-            return [a for a in data if a.get("type") in ALLOWED or
-                    a.get("sport_type") in ALLOWED or
-                    str(a.get("type", "")).lower() in ("run", "ride")]
-
-def calc_fatigue_stats(activities: list) -> dict:
-    """HR・ペース・TSSから疲労指標を算出（ランニングのみ想定）"""
-    hrs, paces, tss_list, loads = [], [], [], []
-    for act in activities:
-        hr = act.get("average_heartrate")
-        if hr is not None:
-            hrs.append(hr)
-        speed = act.get("average_speed") or 0
-        dist = act.get("distance") or 0
-        if speed and dist:
-            paces.append(1000 / speed)  # sec/km
-        tss = act.get("icu_training_load") or act.get("training_load") or act.get("tss")
-        if tss is not None:
-            tss_list.append(tss)
-        load = act.get("icu_rpe_load") or act.get("session_rpe")
-        if load is not None:
-            loads.append(load)
-
-    return {
-        "count": len(activities),
-        "avg_hr": round(sum(hrs) / len(hrs), 1) if hrs else None,
-        "avg_pace_sec": round(sum(paces) / len(paces), 1) if paces else None,
-        "total_tss": round(sum(tss_list), 1) if tss_list else None,
-        "avg_tss": round(sum(tss_list) / len(tss_list), 1) if tss_list else None,
-        "total_distance_km": round(sum(act.get("distance") or 0 for act in activities) / 1000, 1),
-    }
-
-def detect_fatigue(week: dict, month: dict, three_month: dict) -> list:
-    """疲労シグナルを検出してメッセージリストを返す"""
-    warnings = []
-
-    # ① 3ヶ月平均と比較してHRが上昇（ペース同等以下でも心拍増加）
-    if (week.get("avg_hr") and three_month.get("avg_hr") and
-            week["avg_hr"] > three_month["avg_hr"] * 1.05):
-        delta = round(week["avg_hr"] - three_month["avg_hr"], 1)
-        warnings.append(f"❤️ 今週の平均心拍が3ヶ月平均より **+{delta} bpm** 高い（疲労蓄積の可能性）")
-
-    # ② ペース低下（pace_secが大きい＝遅い）
-    if (week.get("avg_pace_sec") and three_month.get("avg_pace_sec") and
-            week["avg_pace_sec"] > three_month["avg_pace_sec"] * 1.04):
-        w_pace = f"{int(week['avg_pace_sec']//60)}:{int(week['avg_pace_sec']%60):02d}"
-        b_pace = f"{int(three_month['avg_pace_sec']//60)}:{int(three_month['avg_pace_sec']%60):02d}"
-        warnings.append(f"🏃 今週の平均ペース **{w_pace}/km** が3ヶ月平均 {b_pace}/km より低下")
-
-    # ③ 週間TSSが1ヶ月平均の週換算より25%以上高い（過負荷）
-    if (week.get("total_tss") and month.get("total_tss") and month["count"] > 0):
-        monthly_weekly_avg = (month["total_tss"] / month["count"]) * 7 if month["count"] else 0
-        if monthly_weekly_avg > 0 and week["total_tss"] > monthly_weekly_avg * 1.25:
-            warnings.append(f"⚡ 今週のTSS **{week['total_tss']}** が月間週平均の125%超（過負荷注意）")
-
-    # ④ 週の練習回数が急増（3ヶ月平均の週換算より50%以上増）
-    if three_month.get("count"):
-        three_month_weekly_avg = three_month["count"] / 13  # 約13週
-        if week["count"] > three_month_weekly_avg * 1.5 and week["count"] >= 2:
-            warnings.append(f"📅 今週の練習回数 **{week['count']}回** が3ヶ月平均の1.5倍超（急増注意）")
-
-    return warnings
-
-def pace_sec_to_str(sec: float) -> str:
-    if not sec:
-        return "—"
-    return f"{int(sec//60)}:{int(sec%60):02d}"
-
-# ========== AIコメント生成 ==========
-
-async def generate_ai_comment(athlete_name: str, activity: dict, detail: dict,
-                               history_week: list, history_month: list) -> str:
-    """Claudeがコーチ視点で練習コメントを生成"""
-
-    def summarize(acts: list) -> dict:
-        if not acts:
-            return {}
-        paces, hrs, tss_list = [], [], []
-        for a in acts:
-            sp = a.get("average_speed", 0)
-            if sp:
-                paces.append(1000 / sp)
-            hr = a.get("average_heartrate")
-            if hr:
-                hrs.append(hr)
-            tss = a.get("icu_training_load") or a.get("training_load") or a.get("tss")
-            if tss:
-                tss_list.append(tss)
-        return {
-            "avg_pace_sec": round(sum(paces)/len(paces), 1) if paces else None,
-            "avg_hr": round(sum(hrs)/len(hrs), 1) if hrs else None,
-            "avg_tss": round(sum(tss_list)/len(tss_list), 1) if tss_list else None,
-            "count": len(acts),
-        }
-
-    today_speed = activity.get("average_speed", 0)
-    today_pace_str = pace_sec_to_str(1000 / today_speed) if today_speed else "不明"
-    today_hr = activity.get("average_heartrate")
-    today_tss = (activity.get("icu_training_load") or activity.get("training_load")
-                 or activity.get("tss"))
-    today_distance = round(activity.get("distance", 0) / 1000, 2)
-
-    week_sum = summarize(history_week)
-    month_sum = summarize(history_month)
-
-    context = f"""
-選手名: {athlete_name}
-今日の練習:
-  距離: {today_distance} km
-  ペース: {today_pace_str}/km
-  平均心拍: {today_hr or '不明'} bpm
-  TSS: {today_tss or '不明'}
-  練習名: {activity.get('name', '不明')}
-
-過去7日間の平均:
-  ペース: {pace_sec_to_str(week_sum.get('avg_pace_sec'))}/km
-  平均心拍: {week_sum.get('avg_hr') or '不明'} bpm
-  平均TSS: {week_sum.get('avg_tss') or '不明'}
-  練習回数: {week_sum.get('count', 0)}回
-
-過去30日間の平均:
-  ペース: {pace_sec_to_str(month_sum.get('avg_pace_sec'))}/km
-  平均心拍: {month_sum.get('avg_hr') or '不明'} bpm
-  平均TSS: {month_sum.get('avg_tss') or '不明'}
-  練習回数: {month_sum.get('count', 0)}回
-"""
-
-    prompt = f"""あなたは中長距離ランナーのコーチです。以下のデータを見て、コーチ視点で短いコメントを2〜3つ生成してください。
-各コメントは1行で完結させ、箇条書き（・）で出力してください。
-具体的な数値の変化（%や秒差）を含め、良い点・改善点・注意点をバランスよく伝えてください。
-余計な前置きや説明は不要です。コメントのみを出力してください。
-
-{context}"""
-
-    headers = {
-        "x-api-key": ANTHROPIC_API_KEY,
-        "anthropic-version": "2023-06-01",
-        "content-type": "application/json"
-    }
-    body = {
-        "model": "claude-opus-4-6",
-        "max_tokens": 400,
-        "messages": [{"role": "user", "content": prompt}]
-    }
-
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.post("https://api.anthropic.com/v1/messages",
-                                    headers=headers, json=body) as resp:
-                if resp.status != 200:
-                    return ""
-                result = await resp.json()
-                return result["content"][0]["text"].strip()
-    except Exception:
-        return ""
-
 async def fetch_icu_activities(api_key: str, athlete_id: str, date: str = None) -> list:
-    """Interval.icuから練習データを取得（ランニングのみ）"""
+    """Interval.icuから練習データを取得"""
     if not date:
-        date = (now_jst() - timedelta(days=1)).strftime("%Y-%m-%d")
+        date = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
 
     url = f"https://intervals.icu/api/v1/athlete/{athlete_id}/activities"
     params = {"oldest": date, "newest": date}
@@ -1175,16 +499,7 @@ async def fetch_icu_activities(api_key: str, athlete_id: str, date: str = None) 
         async with session.get(url, params=params, auth=auth) as resp:
             if resp.status != 200:
                 return []
-            data = await resp.json()
-            if not isinstance(data, list):
-                return []
-            # ランニング・自転車のみフィルタ
-            RUN_TYPES  = {"Run", "VirtualRun"}
-            RIDE_TYPES = {"Ride", "VirtualRide", "MountainBikeRide", "GravelRide"}
-            ALLOWED    = RUN_TYPES | RIDE_TYPES
-            return [a for a in data if a.get("type") in ALLOWED or
-                    a.get("sport_type") in ALLOWED or
-                    str(a.get("type", "")).lower() in ("run", "ride")]
+            return await resp.json()
 
 async def fetch_icu_activity_detail(api_key: str, athlete_id: str, activity_id: str) -> dict:
     """活動の詳細（ゾーン・負荷）を取得"""
@@ -1195,11 +510,7 @@ async def fetch_icu_activity_detail(api_key: str, athlete_id: str, activity_id: 
         async with session.get(url, auth=auth) as resp:
             if resp.status != 200:
                 return {}
-            data = await resp.json()
-            # APIがlistを返す場合は最初の要素を使用、dictならそのまま
-            if isinstance(data, list):
-                return data[0] if data else {}
-            return data if isinstance(data, dict) else {}
+            return await resp.json()
 
 def format_icu_embed(activity: dict, detail: dict, athlete_name: str) -> discord.Embed:
     """Interval.icuデータをEmbedに整形"""
@@ -1210,7 +521,7 @@ def format_icu_embed(activity: dict, detail: dict, athlete_name: str) -> discord
         title=f"📊 {athlete_name} の練習データ",
         description=f"**{name}** — {date}",
         color=0x4361ee,
-        timestamp=now_jst()
+        timestamp=datetime.now()
     )
 
     # 基本データ
@@ -1274,349 +585,51 @@ def format_icu_embed(activity: dict, detail: dict, athlete_name: str) -> discord
     return embed
 
 async def send_icu_report(bot_instance, coach_id: str, api_key: str, athletes: dict, date: str = None):
-    """
-    定時レポート送信:
-      - 練習データ + 統計サマリー  → コーチにDM
-      - 疲労検知アラート           → 選手本人にDM（検知時のみ）
-      - AIコーチコメント           → 選手本人 + コーチ 両方にDM
-      - 未提出アラート             → コーチにDM
-    """
+    """コーチに全選手のレポートを送信"""
     coach = bot_instance.get_user(int(coach_id))
     if not coach:
         return
 
     if not date:
-        date = (now_jst() - timedelta(days=1)).strftime("%Y-%m-%d")
-
-    today = datetime.strptime(date, "%Y-%m-%d")
-
-    oldest_week  = (today - timedelta(days=7)).strftime("%Y-%m-%d")
-    oldest_month = (today - timedelta(days=30)).strftime("%Y-%m-%d")
-    oldest_3m    = (today - timedelta(days=90)).strftime("%Y-%m-%d")
+        date = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
 
     sent = 0
-    no_submit = []
-
-    for athlete_name, athlete_data in athletes.items():
-        icu_id      = get_athlete_icu_id(athlete_data)
-        discord_id  = get_athlete_discord_id(athlete_data)
-
-        # 選手のDiscordユーザーオブジェクトを取得（DM送信用）
-        athlete_user = None
-        if discord_id:
-            try:
-                athlete_user = bot_instance.get_user(int(discord_id)) or await bot_instance.fetch_user(int(discord_id))
-            except Exception:
-                athlete_user = None
-
-        activities = await fetch_icu_activities(api_key, icu_id, date)
-
-        # ── 未提出アラート ──
+    for athlete_name, athlete_id in athletes.items():
+        activities = await fetch_icu_activities(api_key, athlete_id, date)
         if not activities:
-            no_submit.append((athlete_name, athlete_user))
             continue
-
-        mark_submitted(icu_id, date)
-
-        for act in activities[:1]:
-            detail = await fetch_icu_activity_detail(api_key, icu_id, act.get("id", ""))
-
-            # 期間データ取得
-            acts_week  = await fetch_icu_activities_range(api_key, icu_id, oldest_week,  date)
-            acts_month = await fetch_icu_activities_range(api_key, icu_id, oldest_month, date)
-            acts_3m    = await fetch_icu_activities_range(api_key, icu_id, oldest_3m,    date)
-
-            stats_week  = calc_fatigue_stats(acts_week)
-            stats_month = calc_fatigue_stats(acts_month)
-            stats_3m    = calc_fatigue_stats(acts_3m)
-            fatigue_warnings = detect_fatigue(stats_week, stats_month, stats_3m)
-
-            # ── コーチ向けレポートEmbed（全情報） ──
-            coach_embed = format_icu_embed(act, detail, athlete_name)
-
-            stats_lines = (
-                f"**7日間** — {stats_week.get('count',0)}回 ｜ {stats_week.get('total_distance_km',0)}km"
-                f" ｜ HR {stats_week.get('avg_hr') or '—'} bpm ｜ TSS {stats_week.get('total_tss') or '—'}\n"
-                f"**30日間** — {stats_month.get('count',0)}回 ｜ {stats_month.get('total_distance_km',0)}km"
-                f" ｜ HR {stats_month.get('avg_hr') or '—'} bpm ｜ TSS {stats_month.get('total_tss') or '—'}\n"
-                f"**90日間** — {stats_3m.get('count',0)}回 ｜ {stats_3m.get('total_distance_km',0)}km"
-                f" ｜ HR {stats_3m.get('avg_hr') or '—'} bpm ｜ TSS {stats_3m.get('total_tss') or '—'}"
-            )
-            coach_embed.add_field(name="📈 練習負荷統計（7/30/90日）", value=stats_lines, inline=False)
-
-            if fatigue_warnings:
-                coach_embed.add_field(
-                    name="⚠️ 疲労検知アラート",
-                    value="\n".join(fatigue_warnings),
-                    inline=False
-                )
-
-            # ── AIコメント生成 ──
-            ai_comment = await generate_ai_comment(athlete_name, act, detail, acts_week, acts_month)
-            if ai_comment:
-                coach_embed.add_field(name="🤖 AIコーチコメント", value=ai_comment, inline=False)
-
-            # コーチにDM送信
+        for act in activities[:1]:  # 最新1件
+            detail = await fetch_icu_activity_detail(api_key, athlete_id, act.get("id", ""))
+            embed = format_icu_embed(act, detail, athlete_name)
             try:
-                await coach.send(embed=coach_embed)
+                await coach.send(embed=embed)
                 sent += 1
-            except Exception:
+            except:
                 pass
 
-            # ── 選手へのDM送信 ──
-            if athlete_user:
-
-                # 疲労アラートがある場合 → 選手にDM
-                if fatigue_warnings:
-                    fatigue_embed = discord.Embed(
-                        title="⚠️ 疲労検知アラート",
-                        description=f"**{date}** のデータを元に疲労の兆候が検出されました。",
-                        color=0xff6b35,
-                        timestamp=now_jst()
-                    )
-                    fatigue_embed.add_field(
-                        name="検出された項目",
-                        value="\n".join(fatigue_warnings),
-                        inline=False
-                    )
-                    fatigue_embed.add_field(
-                        name="📈 参考データ（7日間）",
-                        value=(
-                            f"練習回数: {stats_week.get('count',0)}回 ｜ {stats_week.get('total_distance_km',0)}km\n"
-                            f"平均心拍: {stats_week.get('avg_hr') or '—'} bpm ｜ "
-                            f"平均ペース: {pace_sec_to_str(stats_week.get('avg_pace_sec'))}/km\n"
-                            f"TSS合計: {stats_week.get('total_tss') or '—'}"
-                        ),
-                        inline=False
-                    )
-                    fatigue_embed.set_footer(text="無理せず休養も大切にしてください 🙏")
-                    try:
-                        await athlete_user.send(
-                            content="📩 **PROJECT NN コーチングシステムからお知らせ**",
-                            embed=fatigue_embed
-                        )
-                    except Exception:
-                        pass
-                    # コーチにも同じ疲労アラートをDM
-                    try:
-                        await coach.send(
-                            content=f"⚠️ **{athlete_name} に疲労検知アラートを送信しました**",
-                            embed=fatigue_embed
-                        )
-                    except Exception:
-                        pass
-
-                # AIコメントがある場合 → 選手にDM
-                if ai_comment:
-                    ai_embed = discord.Embed(
-                        title=f"🤖 {date} の練習フィードバック",
-                        description=f"**{act.get('name', '練習')}** のデータを元にコメントを生成しました。",
-                        color=0x4361ee,
-                        timestamp=now_jst()
-                    )
-                    # 今日の練習サマリーも添付
-                    dist_km = round(act.get("distance", 0) / 1000, 2)
-                    speed = act.get("average_speed", 0)
-                    pace_str = pace_sec_to_str(1000 / speed) if speed else "—"
-                    hr = act.get("average_heartrate")
-                    tss = act.get("icu_training_load") or act.get("training_load") or act.get("tss")
-                    ai_embed.add_field(
-                        name="📊 本日の練習",
-                        value=(
-                            f"距離: **{dist_km} km** ｜ ペース: **{pace_str}/km**\n"
-                            f"平均心拍: {int(hr) if hr else '—'} bpm ｜ TSS: {tss or '—'}"
-                        ),
-                        inline=False
-                    )
-                    ai_embed.add_field(name="💬 AIコメント", value=ai_comment, inline=False)
-                    ai_embed.set_footer(text="PROJECT NN | Interval.icu データより自動生成")
-                    try:
-                        await athlete_user.send(
-                            content="📩 **本日の練習フィードバックが届きました！**",
-                            embed=ai_embed
-                        )
-                    except Exception:
-                        pass
-
-    # ── 未提出選手：コーチにまとめてアラート＋選手本人にも個別DM ──
-    if no_submit:
-        # コーチへまとめて通知
-        alert_embed = discord.Embed(
-            title="🚨 練習未提出アラート",
-            description=f"**{date}** の練習データが届いていない選手がいます。",
-            color=0xff4444,
-            timestamp=now_jst()
-        )
-        alert_embed.add_field(
-            name=f"未提出選手 ({len(no_submit)}名)",
-            value="\n".join(f"• {name}" for name, _ in no_submit),
-            inline=False
-        )
-        alert_embed.set_footer(text="Interval.icu にデータが登録されていない可能性があります")
-        try:
-            await coach.send(embed=alert_embed)
-        except Exception:
-            pass
-
-        # 選手本人へ個別DM
-        for athlete_name, athlete_user in no_submit:
-            if not athlete_user:
-                continue
-            athlete_alert = discord.Embed(
-                title="📋 練習記録の未提出のお知らせ",
-                description=f"**{date}** の練習データがまだ Interval.icu に登録されていません。",
-                color=0xff9900,
-                timestamp=now_jst()
-            )
-            athlete_alert.add_field(
-                name="対応をお願いします",
-                value="練習を行った場合はアプリを同期してください。\nお休みの場合はコーチまでご連絡ください。",
-                inline=False
-            )
-            athlete_alert.set_footer(text="PROJECT NN コーチングシステム")
-            try:
-                await athlete_user.send(
-                    content="📩 **練習記録の未提出があります**",
-                    embed=athlete_alert
-                )
-            except Exception:
-                pass
-
-    if sent == 0 and not no_submit:
+    if sent == 0:
         try:
             await coach.send(f"📭 {date} の練習データはありませんでした。")
-        except Exception:
+        except:
             pass
 
 # ========== 定時送信タスク ==========
 
-WEEKLY_SCHEDULE_FILE = "icu_weekly_schedule.json"
-WEEKDAY_MAP = {"月": 0, "火": 1, "水": 2, "木": 3, "金": 4, "土": 5, "日": 6}
-def load_weekly_schedule():
-    if os.path.exists(WEEKLY_SCHEDULE_FILE):
-        with open(WEEKLY_SCHEDULE_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
-    return {}
-
-def save_weekly_schedule(data):
-    with open(WEEKLY_SCHEDULE_FILE, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
-
-async def send_weekly_fatigue_report(bot_instance, coach_id: str, api_key: str, athletes: dict):
-    """週次疲労分析レポートをコーチ・選手にDM送信"""
-    coach = bot_instance.get_user(int(coach_id))
-    if not coach:
-        return
-
-    today = now_jst()
-    oldest_week  = (today - timedelta(days=7)).strftime("%Y-%m-%d")
-    oldest_month = (today - timedelta(days=30)).strftime("%Y-%m-%d")
-    oldest_3m    = (today - timedelta(days=90)).strftime("%Y-%m-%d")
-    base_date    = today.strftime("%Y-%m-%d")
-
-    for athlete_name, athlete_data in athletes.items():
-        icu_id     = get_athlete_icu_id(athlete_data)
-        discord_id = get_athlete_discord_id(athlete_data)
-
-        athlete_user = None
-        if discord_id:
-            try:
-                athlete_user = bot_instance.get_user(int(discord_id)) or await bot_instance.fetch_user(int(discord_id))
-            except Exception:
-                pass
-
-        acts_week  = await fetch_icu_activities_range(api_key, icu_id, oldest_week,  base_date)
-        acts_month = await fetch_icu_activities_range(api_key, icu_id, oldest_month, base_date)
-        acts_3m    = await fetch_icu_activities_range(api_key, icu_id, oldest_3m,    base_date)
-
-        s_w = calc_fatigue_stats(acts_week)
-        s_m = calc_fatigue_stats(acts_month)
-        s_3 = calc_fatigue_stats(acts_3m)
-        warnings = detect_fatigue(s_w, s_m, s_3)
-
-        def stat_row(s: dict) -> str:
-            p = pace_sec_to_str(s.get("avg_pace_sec"))
-            return (
-                f"練習: **{s.get('count',0)}回** ｜ {s.get('total_distance_km',0)}km\n"
-                f"avg HR: {s.get('avg_hr') or '—'} bpm ｜ ペース: {p}/km\n"
-                f"TSS合計: {s.get('total_tss') or '—'} ｜ avg: {s.get('avg_tss') or '—'}"
-            )
-
-        # ── コーチ向けEmbed ──
-        coach_embed = discord.Embed(
-            title=f"📊 週次疲労分析レポート — {athlete_name}",
-            description=f"集計基準日: {base_date}",
-            color=0x7b2ff7,
-            timestamp=now_jst()
-        )
-        coach_embed.add_field(name="📅 7日間",  value=stat_row(s_w), inline=True)
-        coach_embed.add_field(name="📆 30日間", value=stat_row(s_m), inline=True)
-        coach_embed.add_field(name="📊 90日間", value=stat_row(s_3), inline=True)
-
-        if warnings:
-            coach_embed.add_field(name="⚠️ 疲労シグナル", value="\n".join(warnings), inline=False)
-        else:
-            coach_embed.add_field(name="✅ 疲労シグナル", value="今週は疲労の兆候は検出されませんでした。", inline=False)
-        coach_embed.set_footer(text="PROJECT NN | 週次自動レポート")
-
-        try:
-            await coach.send(content=f"📋 **{athlete_name} の週次疲労分析レポートです**", embed=coach_embed)
-        except Exception:
-            pass
-
-        # ── 選手向けEmbed（警告がある場合のみ送信） ──
-        if athlete_user and warnings:
-            athlete_embed = discord.Embed(
-                title="⚠️ 週次疲労分析レポート",
-                description=f"今週（{oldest_week} 〜 {base_date}）のデータを分析しました。",
-                color=0xff6b35,
-                timestamp=now_jst()
-            )
-            athlete_embed.add_field(
-                name="📅 今週のサマリー",
-                value=stat_row(s_w),
-                inline=False
-            )
-            athlete_embed.add_field(
-                name="⚠️ 検出された疲労シグナル",
-                value="\n".join(warnings),
-                inline=False
-            )
-            athlete_embed.set_footer(text="無理せず休養も大切にしてください 🙏 | PROJECT NN")
-            try:
-                await athlete_user.send(
-                    content="📩 **今週の疲労分析レポートが届きました**",
-                    embed=athlete_embed
-                )
-            except Exception:
-                pass
+from discord.ext import tasks
 
 @tasks.loop(minutes=1)
 async def icu_scheduler():
-    """毎分チェックして日次・週次を送信"""
-    now      = now_jst()
-    now_hm   = now.strftime("%H:%M")
-    weekday  = now.weekday()  # 0=月 〜 6=日
-
-    daily_schedule  = load_schedule()
-    weekly_schedule = load_weekly_schedule()
+    """毎分チェックして設定時刻に送信"""
+    now = datetime.now().strftime("%H:%M")
+    schedule = load_schedule()
     icu = load_icu()
 
-    # 日次レポート
-    for coach_id, time_str in daily_schedule.items():
-        if time_str == now_hm:
+    for coach_id, time_str in schedule.items():
+        if time_str == now:
             athletes = icu.get(coach_id, {}).get("athletes", {})
-            api_key  = icu.get(coach_id, {}).get("api_key", "")
+            api_key = icu.get(coach_id, {}).get("api_key", "")
             if api_key and athletes:
                 await send_icu_report(bot, coach_id, api_key, athletes)
-
-    # 週次疲労レポート
-    for coach_id, cfg in weekly_schedule.items():
-        if cfg.get("weekday") == weekday and cfg.get("time") == now_hm:
-            athletes = icu.get(coach_id, {}).get("athletes", {})
-            api_key  = icu.get(coach_id, {}).get("api_key", "")
-            if api_key and athletes:
-                await send_weekly_fatigue_report(bot, coach_id, api_key, athletes)
 
 @bot.listen("on_ready")
 async def start_scheduler():
@@ -1625,51 +638,41 @@ async def start_scheduler():
 
 # ========== Interval.icu コマンド ==========
 
-@bot.tree.command(name="icu_setup", description="【管理者】Interval.icu APIキー・コーチ・選手を登録する")
+@bot.tree.command(name="icu_setup", description="【コーチ】Interval.icu APIキーと選手を登録する")
 @app_commands.describe(
-    coach="DM送信先のコーチ（メンション）",
     api_key="Interval.icu の APIキー",
     athlete_name="選手の名前",
-    athlete_id="選手のInterval.icuアスリートID",
-    athlete_member="選手のDiscordアカウント（メンション）"
+    athlete_id="選手のInterval.icuアスリートID"
 )
-@app_commands.checks.has_permissions(manage_guild=True)
-async def icu_setup(interaction: discord.Interaction, coach: discord.Member, api_key: str,
-                    athlete_name: str, athlete_id: str, athlete_member: discord.Member):
+async def icu_setup(interaction: discord.Interaction, api_key: str, athlete_name: str, athlete_id: str):
     icu = load_icu()
-    coach_id = str(coach.id)
+    coach_id = str(interaction.user.id)
 
     if coach_id not in icu:
         icu[coach_id] = {"api_key": api_key, "athletes": {}}
 
     icu[coach_id]["api_key"] = api_key
-    icu[coach_id]["athletes"][athlete_name] = {
-        "icu_id": athlete_id,
-        "discord_id": str(athlete_member.id)
-    }
+    icu[coach_id]["athletes"][athlete_name] = athlete_id
     save_icu(icu)
 
     embed = discord.Embed(title="✅ Interval.icu 設定完了！", color=0x00cc66)
-    embed.add_field(name="コーチ", value=coach.mention, inline=True)
-    embed.add_field(name="選手名", value=athlete_name, inline=True)
-    embed.add_field(name="ICU ID", value=athlete_id, inline=True)
-    embed.add_field(name="Discord", value=athlete_member.mention, inline=True)
+    embed.add_field(name="選手", value=athlete_name, inline=True)
+    embed.add_field(name="アスリートID", value=athlete_id, inline=True)
     embed.set_footer(text="/icu_setup を繰り返して選手を追加できます")
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
 @bot.tree.command(name="icu", description="選手のInterval.icu練習データを取得")
 @app_commands.describe(
-    coach="対象コーチ（メンション）",
     athlete_name="選手の名前",
     date="日付（例: 2026-03-14）省略すると昨日"
 )
-async def icu(interaction: discord.Interaction, coach: discord.Member, athlete_name: str, date: str = None):
+async def icu(interaction: discord.Interaction, athlete_name: str, date: str = None):
     await interaction.response.defer()
     icu_data = load_icu()
-    coach_id = str(coach.id)
+    coach_id = str(interaction.user.id)
 
     if coach_id not in icu_data:
-        await interaction.followup.send(f"❌ {coach.mention} は `/icu_setup` で登録されていません。", ephemeral=True)
+        await interaction.followup.send("❌ 先に `/icu_setup` でAPIキーを設定してください。", ephemeral=True)
         return
 
     api_key = icu_data[coach_id]["api_key"]
@@ -1680,264 +683,64 @@ async def icu(interaction: discord.Interaction, coach: discord.Member, athlete_n
         await interaction.followup.send(f"❌ 選手が見つかりません。登録済み: {names}", ephemeral=True)
         return
 
-    athlete_id = get_athlete_icu_id(athletes[athlete_name])
-    target_date = date or (now_jst() - timedelta(days=1)).strftime("%Y-%m-%d")
+    athlete_id = athletes[athlete_name]
+    target_date = date or (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
 
     activities = await fetch_icu_activities(api_key, athlete_id, target_date)
     if not activities:
         await interaction.followup.send(f"📭 {athlete_name} の {target_date} の練習データはありません。")
         return
 
-    today = datetime.strptime(target_date, "%Y-%m-%d")
     for act in activities[:1]:
         detail = await fetch_icu_activity_detail(api_key, athlete_id, act.get("id", ""))
         embed = format_icu_embed(act, detail, athlete_name)
-
-        # 疲労検知
-        oldest_week  = (today - timedelta(days=7)).strftime("%Y-%m-%d")
-        oldest_month = (today - timedelta(days=30)).strftime("%Y-%m-%d")
-        oldest_3m    = (today - timedelta(days=90)).strftime("%Y-%m-%d")
-        acts_week  = await fetch_icu_activities_range(api_key, athlete_id, oldest_week, target_date)
-        acts_month = await fetch_icu_activities_range(api_key, athlete_id, oldest_month, target_date)
-        acts_3m    = await fetch_icu_activities_range(api_key, athlete_id, oldest_3m, target_date)
-        stats_week  = calc_fatigue_stats(acts_week)
-        stats_month = calc_fatigue_stats(acts_month)
-        stats_3m    = calc_fatigue_stats(acts_3m)
-        fatigue_warnings = detect_fatigue(stats_week, stats_month, stats_3m)
-        if fatigue_warnings:
-            embed.add_field(
-                name="⚠️ 疲労検知アラート",
-                value="\n".join(fatigue_warnings),
-                inline=False
-            )
-
-        stats_lines = (
-            f"**7日間** — {stats_week.get('count',0)}回 ｜ {stats_week.get('total_distance_km',0)}km"
-            f"｜ avg HR {stats_week.get('avg_hr') or '—'} bpm ｜ TSS {stats_week.get('total_tss') or '—'}\n"
-            f"**30日間** — {stats_month.get('count',0)}回 ｜ {stats_month.get('total_distance_km',0)}km"
-            f"｜ avg HR {stats_month.get('avg_hr') or '—'} bpm ｜ TSS {stats_month.get('total_tss') or '—'}\n"
-            f"**90日間** — {stats_3m.get('count',0)}回 ｜ {stats_3m.get('total_distance_km',0)}km"
-            f"｜ avg HR {stats_3m.get('avg_hr') or '—'} bpm ｜ TSS {stats_3m.get('total_tss') or '—'}"
-        )
-        embed.add_field(name="📈 練習負荷統計", value=stats_lines, inline=False)
-
-        # AIコメント
-        ai_comment = await generate_ai_comment(athlete_name, act, detail, acts_week, acts_month)
-        if ai_comment:
-            embed.add_field(name="🤖 AIコーチコメント", value=ai_comment, inline=False)
-
         await interaction.followup.send(embed=embed)
 
-@bot.tree.command(name="icu_settime", description="【管理者】Interval.icuレポートの自動送信時刻を設定")
-@app_commands.describe(
-    coach="対象コーチ（メンション）",
-    time="送信時刻（例: 09:00）"
-)
-@app_commands.checks.has_permissions(manage_guild=True)
-async def icu_settime(interaction: discord.Interaction, coach: discord.Member, time: str):
+@bot.tree.command(name="icu_settime", description="【コーチ】Interval.icuレポートの自動送信時刻を設定")
+@app_commands.describe(time="送信時刻（例: 09:00）")
+async def icu_settime(interaction: discord.Interaction, time: str):
     # 時刻フォーマット確認
     try:
         datetime.strptime(time, "%H:%M")
-    except ValueError:
+    except:
         await interaction.response.send_message("❌ 時刻の形式が違います。例: `09:00`", ephemeral=True)
         return
 
     schedule = load_schedule()
-    schedule[str(coach.id)] = time
+    schedule[str(interaction.user.id)] = time
     save_schedule(schedule)
 
     embed = discord.Embed(title="✅ 自動送信時刻を設定しました！", color=0x00cc66)
-    embed.add_field(name="コーチ", value=coach.mention, inline=True)
     embed.add_field(name="送信時刻", value=f"毎日 **{time}**", inline=True)
     embed.set_footer(text="前日の全選手の練習データがDMに届きます")
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
-@bot.tree.command(name="icu_fatigue", description="選手の疲労状況を確認する")
-@app_commands.describe(
-    coach="対象コーチ（メンション）",
-    athlete_name="選手の名前",
-    date="基準日（省略で今日）"
-)
-async def icu_fatigue(interaction: discord.Interaction, coach: discord.Member,
-                      athlete_name: str, date: str = None):
-    await interaction.response.defer()
-    icu_data = load_icu()
-    coach_id = str(coach.id)
-    if coach_id not in icu_data:
-        await interaction.followup.send("❌ コーチが登録されていません。", ephemeral=True)
-        return
-    api_key = icu_data[coach_id]["api_key"]
-    athletes = icu_data[coach_id]["athletes"]
-    if athlete_name not in athletes:
-        await interaction.followup.send(f"❌ 選手 '{athlete_name}' が見つかりません。", ephemeral=True)
-        return
-
-    athlete_id = get_athlete_icu_id(athletes[athlete_name])
-    target_date = date or now_jst().strftime("%Y-%m-%d")
-    today = datetime.strptime(target_date, "%Y-%m-%d")
-
-    oldest_week  = (today - timedelta(days=7)).strftime("%Y-%m-%d")
-    oldest_month = (today - timedelta(days=30)).strftime("%Y-%m-%d")
-    oldest_3m    = (today - timedelta(days=90)).strftime("%Y-%m-%d")
-
-    acts_week  = await fetch_icu_activities_range(api_key, athlete_id, oldest_week, target_date)
-    acts_month = await fetch_icu_activities_range(api_key, athlete_id, oldest_month, target_date)
-    acts_3m    = await fetch_icu_activities_range(api_key, athlete_id, oldest_3m, target_date)
-
-    s_w = calc_fatigue_stats(acts_week)
-    s_m = calc_fatigue_stats(acts_month)
-    s_3 = calc_fatigue_stats(acts_3m)
-    warnings = detect_fatigue(s_w, s_m, s_3)
-
-    embed = discord.Embed(
-        title=f"🔬 {athlete_name} 疲労分析レポート",
-        description=f"基準日: {target_date}",
-        color=0xff6b35,
-        timestamp=now_jst()
-    )
-
-    def row(s: dict, label: str) -> str:
-        p = pace_sec_to_str(s.get("avg_pace_sec"))
-        return (f"練習: **{s.get('count',0)}回** ｜ {s.get('total_distance_km',0)}km\n"
-                f"avg HR: {s.get('avg_hr') or '—'} bpm ｜ ペース: {p}\n"
-                f"TSS合計: {s.get('total_tss') or '—'} ｜ avg: {s.get('avg_tss') or '—'}")
-
-    embed.add_field(name="📅 7日間",  value=row(s_w, "週"), inline=True)
-    embed.add_field(name="📆 30日間", value=row(s_m, "月"), inline=True)
-    embed.add_field(name="📊 90日間", value=row(s_3, "3ヶ月"), inline=True)
-
-    if warnings:
-        embed.add_field(name="⚠️ 疲労シグナル", value="\n".join(warnings), inline=False)
-    else:
-        embed.add_field(name="✅ 疲労シグナル", value="現時点で疲労の兆候は検出されていません。", inline=False)
-
-    embed.set_footer(text="Interval.icu データを元に算出")
-    await interaction.followup.send(embed=embed)
-
-@bot.tree.command(name="icu_setweekly", description="【管理者】週次疲労分析レポートの自動送信を設定する")
-@app_commands.describe(
-    coach="対象コーチ（メンション）",
-    weekday="送信する曜日",
-    time="送信時刻（例: 09:00）"
-)
-@app_commands.choices(weekday=[
-    app_commands.Choice(name="月曜日", value="月"),
-    app_commands.Choice(name="火曜日", value="火"),
-    app_commands.Choice(name="水曜日", value="水"),
-    app_commands.Choice(name="木曜日", value="木"),
-    app_commands.Choice(name="金曜日", value="金"),
-    app_commands.Choice(name="土曜日", value="土"),
-    app_commands.Choice(name="日曜日", value="日"),
-])
-@app_commands.checks.has_permissions(manage_guild=True)
-async def icu_setweekly(interaction: discord.Interaction, coach: discord.Member,
-                        weekday: app_commands.Choice[str], time: str):
-    try:
-        datetime.strptime(time, "%H:%M")
-    except ValueError:
-        await interaction.response.send_message("❌ 時刻の形式が違います。例: `09:00`", ephemeral=True)
-        return
-
-    weekly = load_weekly_schedule()
-    weekly[str(coach.id)] = {"weekday": WEEKDAY_MAP[weekday.value], "time": time}
-    save_weekly_schedule(weekly)
-
-    embed = discord.Embed(title="✅ 週次疲労レポートを設定しました！", color=0x7b2ff7)
-    embed.add_field(name="コーチ", value=coach.mention, inline=True)
-    embed.add_field(name="送信タイミング", value=f"毎週**{weekday.name}** {time}", inline=True)
-    embed.set_footer(text="全選手の疲労分析レポートがコーチ・選手にDMで届きます")
-    await interaction.response.send_message(embed=embed, ephemeral=True)
-
-@bot.tree.command(name="icu_cancelweekly", description="【管理者】週次疲労レポートの自動送信をキャンセル")
-@app_commands.describe(coach="対象コーチ（メンション）")
-@app_commands.checks.has_permissions(manage_guild=True)
-async def icu_cancelweekly(interaction: discord.Interaction, coach: discord.Member):
-    weekly = load_weekly_schedule()
-    coach_id = str(coach.id)
-    if coach_id in weekly:
-        del weekly[coach_id]
-        save_weekly_schedule(weekly)
-        await interaction.response.send_message(f"✅ {coach.mention} の週次疲労レポートをキャンセルしました。", ephemeral=True)
-    else:
-        await interaction.response.send_message("❌ 週次疲労レポートは設定されていません。", ephemeral=True)
-
-@bot.tree.command(name="icu_canceltime", description="【管理者】自動送信をキャンセル")
-@app_commands.checks.has_permissions(manage_guild=True)
-async def icu_canceltime(interaction: discord.Interaction, coach: discord.Member):
+@bot.tree.command(name="icu_canceltime", description="【コーチ】自動送信をキャンセル")
+async def icu_canceltime(interaction: discord.Interaction):
     schedule = load_schedule()
-    coach_id = str(coach.id)
+    coach_id = str(interaction.user.id)
     if coach_id in schedule:
         del schedule[coach_id]
         save_schedule(schedule)
-        await interaction.response.send_message(f"✅ {coach.mention} の自動送信をキャンセルしました。", ephemeral=True)
+        await interaction.response.send_message("✅ 自動送信をキャンセルしました。", ephemeral=True)
     else:
         await interaction.response.send_message("❌ 自動送信は設定されていません。", ephemeral=True)
 
-@bot.tree.command(name="icu_athletes", description="【管理者】登録済み選手一覧を表示")
-@app_commands.describe(coach="対象コーチ（メンション）")
-@app_commands.checks.has_permissions(manage_guild=True)
-async def icu_athletes(interaction: discord.Interaction, coach: discord.Member):
+@bot.tree.command(name="icu_athletes", description="【コーチ】登録済み選手一覧を表示")
+async def icu_athletes(interaction: discord.Interaction):
     icu_data = load_icu()
-    coach_id = str(coach.id)
+    coach_id = str(interaction.user.id)
 
     if coach_id not in icu_data or not icu_data[coach_id].get("athletes"):
-        await interaction.response.send_message(f"📭 {coach.mention} に選手が登録されていません。`/icu_setup` で登録してください。", ephemeral=True)
+        await interaction.response.send_message("📭 選手が登録されていません。`/icu_setup` で登録してください。", ephemeral=True)
         return
 
     athletes = icu_data[coach_id]["athletes"]
     schedule = load_schedule()
     time_str = schedule.get(coach_id, "未設定")
 
-    embed = discord.Embed(title=f"👥 {coach.display_name} の登録済み選手一覧", color=0x3399ff)
-    for name, adata in athletes.items():
-        icu_id = get_athlete_icu_id(adata)
-        discord_id = get_athlete_discord_id(adata)
-        discord_str = f"<@{discord_id}>" if discord_id else "未設定"
-        embed.add_field(name=name, value=f"ICU ID: `{icu_id}`\nDiscord: {discord_str}", inline=True)
+    embed = discord.Embed(title="👥 登録済み選手一覧", color=0x3399ff)
+    for name, aid in athletes.items():
+        embed.add_field(name=name, value=f"ID: {aid}", inline=True)
     embed.set_footer(text=f"自動送信時刻: {time_str}")
     await interaction.response.send_message(embed=embed, ephemeral=True)
-
-# ========== Discord ID紐付け ==========
-
-@bot.tree.command(name="icu_link_discord", description="【管理者】選手のDiscordアカウントをICU選手情報に紐付ける")
-@app_commands.describe(
-    coach="対象コーチ（メンション）",
-    athlete_name="選手の名前（/icu_setup で登録済みの名前）",
-    member="選手のDiscordアカウント（メンション）"
-)
-@app_commands.checks.has_permissions(manage_guild=True)
-async def icu_link_discord(interaction: discord.Interaction, coach: discord.Member,
-                           athlete_name: str, member: discord.Member):
-    icu = load_icu()
-    coach_id = str(coach.id)
-
-    if coach_id not in icu:
-        await interaction.response.send_message("❌ コーチが登録されていません。先に `/icu_setup` を実行してください。", ephemeral=True)
-        return
-
-    athletes = icu[coach_id].get("athletes", {})
-    if athlete_name not in athletes:
-        names = "、".join(athletes.keys())
-        await interaction.response.send_message(f"❌ 選手 `{athlete_name}` が見つかりません。登録済み: {names}", ephemeral=True)
-        return
-
-    # 旧形式（文字列）の場合は辞書に変換
-    current = athletes[athlete_name]
-    if isinstance(current, str):
-        icu[coach_id]["athletes"][athlete_name] = {
-            "icu_id": current,
-            "discord_id": str(member.id)
-        }
-    else:
-        icu[coach_id]["athletes"][athlete_name]["discord_id"] = str(member.id)
-
-    save_icu(icu)
-
-    embed = discord.Embed(title="✅ Discord紐付け完了！", color=0x00cc66)
-    embed.add_field(name="選手名", value=athlete_name, inline=True)
-    embed.add_field(name="Discordアカウント", value=member.mention, inline=True)
-    embed.set_footer(text="これで疲労アラート・AIコメント・未提出通知がDMで届きます")
-    await interaction.response.send_message(embed=embed, ephemeral=True)
-
-# ========== 起動 ==========
-bot.run(os.environ["DISCORD_TOKEN"])
