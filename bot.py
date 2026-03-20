@@ -1044,8 +1044,35 @@ def get_athlete_discord_id(athlete_data) -> str | None:
 
 # ========== 疲労検知 ==========
 
+# デフォルト・自動生成タイトルの除外パターン
+EXCLUDED_TITLE_PATTERNS = [
+    # 英語デフォルト
+    r"^morning run$", r"^afternoon run$", r"^evening run$", r"^night run$",
+    r"^running$", r"^run$", r"^easy run$", r"^lunch run$",
+    r"^morning ride$", r"^afternoon ride$", r"^evening ride$", r"^ride$", r"^cycling$",
+    # 地名+ランパターン（例: 長野市 ラン、東京都 ラン）
+    r".+[都道府県市区町村]\s*ラン$",
+    r".+[都道府県市区町村]\s*ライド$",
+    r".+[都道府県市区町村]\s*run$",
+    # その他自動生成っぽいもの
+    r"^ラン$", r"^ランニング$", r"^ライド$",
+]
+
+import re as _re
+_EXCLUDED_COMPILED = [_re.compile(p, _re.IGNORECASE) for p in EXCLUDED_TITLE_PATTERNS]
+
+def has_custom_title(activity: dict) -> bool:
+    """カスタムタイトルが付いているかどうかを判定"""
+    name = (activity.get("name") or "").strip()
+    if not name:
+        return False
+    for pattern in _EXCLUDED_COMPILED:
+        if pattern.match(name):
+            return False
+    return True
+
 async def fetch_icu_activities_range(api_key: str, athlete_id: str, oldest: str, newest: str) -> list:
-    """指定期間のICUデータを取得（ランニングのみ）"""
+    """指定期間のICUデータを取得（ランニング・自転車のみ、カスタムタイトル付きのみ）"""
     url = f"https://intervals.icu/api/v1/athlete/{athlete_id}/activities"
     params = {"oldest": oldest, "newest": newest}
     auth = aiohttp.BasicAuth("API_KEY", api_key)
@@ -1060,9 +1087,11 @@ async def fetch_icu_activities_range(api_key: str, athlete_id: str, oldest: str,
             RUN_TYPES  = {"Run", "VirtualRun"}
             RIDE_TYPES = {"Ride", "VirtualRide", "MountainBikeRide", "GravelRide"}
             ALLOWED    = RUN_TYPES | RIDE_TYPES
-            return [a for a in data if a.get("type") in ALLOWED or
-                    a.get("sport_type") in ALLOWED or
-                    str(a.get("type", "")).lower() in ("run", "ride")]
+            filtered = [a for a in data if a.get("type") in ALLOWED or
+                        a.get("sport_type") in ALLOWED or
+                        str(a.get("type", "")).lower() in ("run", "ride")]
+            # カスタムタイトル付きのみ
+            return [a for a in filtered if has_custom_title(a)]
 
 def calc_fatigue_stats(activities: list) -> dict:
     """HR・ペース・TSSから疲労指標を算出（ランニングのみ想定）"""
@@ -1216,7 +1245,7 @@ async def generate_ai_comment(athlete_name: str, activity: dict, detail: dict,
         return ""
 
 async def fetch_icu_activities(api_key: str, athlete_id: str, date: str = None) -> list:
-    """Interval.icuから練習データを取得（ランニングのみ）"""
+    """Interval.icuから練習データを取得（ランニング・自転車・カスタムタイトルのみ）"""
     if not date:
         date = (now_jst() - timedelta(days=1)).strftime("%Y-%m-%d")
 
@@ -1235,9 +1264,11 @@ async def fetch_icu_activities(api_key: str, athlete_id: str, date: str = None) 
             RUN_TYPES  = {"Run", "VirtualRun"}
             RIDE_TYPES = {"Ride", "VirtualRide", "MountainBikeRide", "GravelRide"}
             ALLOWED    = RUN_TYPES | RIDE_TYPES
-            return [a for a in data if a.get("type") in ALLOWED or
-                    a.get("sport_type") in ALLOWED or
-                    str(a.get("type", "")).lower() in ("run", "ride")]
+            filtered = [a for a in data if a.get("type") in ALLOWED or
+                        a.get("sport_type") in ALLOWED or
+                        str(a.get("type", "")).lower() in ("run", "ride")]
+            # カスタムタイトル付きのみ
+            return [a for a in filtered if has_custom_title(a)]
 
 async def fetch_icu_activity_detail(api_key: str, athlete_id: str, activity_id: str) -> dict:
     """活動の詳細（ゾーン・負荷）を取得"""
