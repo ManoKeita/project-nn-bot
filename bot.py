@@ -1942,6 +1942,212 @@ async def icu_cancelweekly(interaction: discord.Interaction, coach: discord.Memb
     else:
         await interaction.response.send_message("❌ 週次疲労レポートは設定されていません。", ephemeral=True)
 
+# ========== 練習カレンダー ==========
+
+WEEKDAY_JA = ["月", "火", "水", "木", "金", "土", "日"]
+
+async def build_calendar_embed(api_key: str, athlete_id: str, athlete_name: str,
+                                week_start: datetime) -> tuple:
+    """週のカレンダーEmbedとアクティビティリストを返す"""
+    week_end = week_start + timedelta(days=6)
+    oldest = week_start.strftime("%Y-%m-%d")
+    newest = week_end.strftime("%Y-%m-%d")
+
+    # タイトルフィルタなしで全アクティビティ取得
+    url = f"https://intervals.icu/api/v1/athlete/{athlete_id}/activities"
+    params = {"oldest": oldest, "newest": newest}
+    auth = aiohttp.BasicAuth("API_KEY", api_key)
+    activities = []
+    async with aiohttp.ClientSession() as session:
+        async with session.get(url, params=params, auth=auth) as resp:
+            if resp.status == 200:
+                data = await resp.json()
+                if isinstance(data, list):
+                    RUN_TYPES  = {"Run", "VirtualRun"}
+                    RIDE_TYPES = {"Ride", "VirtualRide", "MountainBikeRide", "GravelRide"}
+                    ALLOWED    = RUN_TYPES | RIDE_TYPES
+                    activities = [a for a in data if a.get("type") in ALLOWED or
+                                  a.get("sport_type") in ALLOWED or
+                                  str(a.get("type", "")).lower() in ("run", "ride")]
+
+    from collections import defaultdict
+    day_map = defaultdict(list)
+    for act in activities:
+        d = act.get("start_date_local", "")[:10]
+        day_map[d].append(act)
+
+    embed = discord.Embed(
+        title=f"📅 {athlete_name} の練習カレンダー",
+        description=f"{week_start.strftime('%Y年%m月%d日')} 〜 {week_end.strftime('%m月%d日')}",
+        color=0x4361ee,
+        timestamp=now_jst()
+    )
+
+    selectable = []
+    for i in range(7):
+        day = week_start + timedelta(days=i)
+        d_str = day.strftime("%Y-%m-%d")
+        dow = WEEKDAY_JA[day.weekday()]
+        label = f"{day.strftime('%m/%d')}({dow})"
+
+        if d_str in day_map:
+            lines = []
+            for act in day_map[d_str]:
+                dist = round((act.get("distance") or 0) / 1000, 1)
+                spd  = act.get("average_speed") or 0
+                pace = pace_sec_to_str(1000 / spd) if spd else "—"
+                name = act.get("name", "練習")
+                lines.append(f"{name}　{dist}km　{pace}/km")
+                selectable.append(act)
+            embed.add_field(name=label, value="\n".join(lines), inline=False)
+        else:
+            embed.add_field(name=label, value="—", inline=False)
+
+    embed.set_footer(text="◀ 前の週 / 次の週 ▶ で移動 | 練習を選択して詳細表示")
+    return embed, selectable
+
+
+class ActivitySelect(discord.ui.Select):
+    def __init__(self, api_key: str, athlete_id: str, athlete_name: str, activities: list):
+        self.api_key      = api_key
+        self.athlete_id   = athlete_id
+        self.athlete_name = athlete_name
+        self.act_map      = {}
+
+        options = []
+        for act in activities[:25]:
+            act_id = str(act.get("id", ""))
+            date   = act.get("start_date_local", "")[:10]
+            name   = act.get("name", "練習")
+            dist   = round((act.get("distance") or 0) / 1000, 1)
+            self.act_map[act_id] = act
+            options.append(discord.SelectOption(
+                label=f"{date} {name}"[:100],
+                description=f"{dist}km",
+                value=act_id
+            ))
+
+        super().__init__(
+            placeholder="練習を選択して詳細を表示...",
+            options=options if options else [discord.SelectOption(label="データなし", value="none")],
+            custom_id="activity_select",
+            row=2
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        if self.values[0] == "none":
+            await interaction.response.send_message("データがありません。", ephemeral=True)
+            return
+        act_id = self.values[0]
+        act    = self.act_map.get(act_id)
+        if not act:
+            await interaction.response.send_message("❌ データが見つかりません。", ephemeral=True)
+            return
+        detail = await fetch_icu_activity_detail(self.api_key, self.athlete_id, act_id)
+        embed  = format_icu_embed(act, detail, self.athlete_name)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+
+class CalendarView(discord.ui.View):
+    def __init__(self, api_key: str, athlete_id: str, athlete_name: str,
+                 user_id: str, week_start: datetime):
+        super().__init__(timeout=600)
+        self.api_key      = api_key
+        self.athlete_id   = athlete_id
+        self.athlete_name = athlete_name
+        self.user_id      = user_id
+        self.week_start   = week_start
+
+    async def refresh(self, interaction: discord.Interaction):
+        embed, selectable = await build_calendar_embed(
+            self.api_key, self.athlete_id, self.athlete_name, self.week_start)
+
+        # 選択メニューを再構築
+        new_view = CalendarView(self.api_key, self.athlete_id, self.athlete_name,
+                                self.user_id, self.week_start)
+        if selectable:
+            new_view.add_item(ActivitySelect(
+                self.api_key, self.athlete_id, self.athlete_name, selectable))
+
+        # 1ヶ月前より前には戻れない
+        one_month_ago = (now_jst() - timedelta(days=30)).replace(
+            hour=0, minute=0, second=0, microsecond=0)
+        one_month_ago -= timedelta(days=one_month_ago.weekday())
+
+        for item in new_view.children:
+            if isinstance(item, discord.ui.Button):
+                if item.custom_id == "prev_week":
+                    item.disabled = self.week_start <= one_month_ago
+                elif item.custom_id == "next_week":
+                    item.disabled = self.week_start + timedelta(days=7) > now_jst()
+
+        await interaction.response.edit_message(embed=embed, view=new_view)
+
+    @discord.ui.button(label="◀ 前の週", style=discord.ButtonStyle.secondary,
+                       custom_id="prev_week", row=1)
+    async def prev_week(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if str(interaction.user.id) != self.user_id:
+            await interaction.response.send_message("❌ 操作できません。", ephemeral=True)
+            return
+        self.week_start -= timedelta(days=7)
+        await self.refresh(interaction)
+
+    @discord.ui.button(label="次の週 ▶", style=discord.ButtonStyle.secondary,
+                       custom_id="next_week", row=1)
+    async def next_week(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if str(interaction.user.id) != self.user_id:
+            await interaction.response.send_message("❌ 操作できません。", ephemeral=True)
+            return
+        self.week_start += timedelta(days=7)
+        await self.refresh(interaction)
+
+
+@bot.tree.command(name="icu_calendar", description="選手の練習カレンダーを週めくりで表示")
+@app_commands.describe(
+    coach="対象コーチ（メンション）",
+    athlete_name="選手の名前"
+)
+async def icu_calendar(interaction: discord.Interaction, coach: discord.Member, athlete_name: str):
+    await interaction.response.defer()
+    icu_data = load_icu()
+    coach_id = str(coach.id)
+
+    if coach_id not in icu_data:
+        await interaction.followup.send(f"❌ {coach.mention} は登録されていません。", ephemeral=True)
+        return
+
+    api_key  = icu_data[coach_id]["api_key"]
+    athletes = icu_data[coach_id]["athletes"]
+
+    if athlete_name not in athletes:
+        names = "、".join(athletes.keys())
+        await interaction.followup.send(f"❌ 選手が見つかりません。登録済み: {names}", ephemeral=True)
+        return
+
+    athlete_id = get_athlete_icu_id(athletes[athlete_name])
+
+    today      = now_jst()
+    week_start = today - timedelta(days=today.weekday())
+    week_start = week_start.replace(hour=0, minute=0, second=0, microsecond=0)
+
+    embed, selectable = await build_calendar_embed(api_key, athlete_id, athlete_name, week_start)
+    view = CalendarView(api_key, athlete_id, athlete_name, str(interaction.user.id), week_start)
+
+    if selectable:
+        view.add_item(ActivitySelect(api_key, athlete_id, athlete_name, selectable))
+
+    # 初期状態のボタン制御
+    one_month_ago = (now_jst() - timedelta(days=30)).replace(hour=0, minute=0, second=0, microsecond=0)
+    one_month_ago -= timedelta(days=one_month_ago.weekday())
+    for item in view.children:
+        if isinstance(item, discord.ui.Button) and item.custom_id == "prev_week":
+            item.disabled = week_start <= one_month_ago
+        if isinstance(item, discord.ui.Button) and item.custom_id == "next_week":
+            item.disabled = True  # 今週が最新
+
+    await interaction.followup.send(embed=embed, view=view)
+
+
 @bot.tree.command(name="icu_canceltime", description="【管理者】自動送信をキャンセル")
 @app_commands.checks.has_permissions(manage_guild=True)
 async def icu_canceltime(interaction: discord.Interaction, coach: discord.Member):
