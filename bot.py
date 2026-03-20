@@ -1064,11 +1064,14 @@ _EXCLUDED_COMPILED = [_re.compile(p, _re.IGNORECASE) for p in EXCLUDED_TITLE_PAT
 def has_custom_title(activity: dict) -> bool:
     """カスタムタイトルが付いているかどうかを判定"""
     name = (activity.get("name") or "").strip()
+    print(f"[TITLE CHECK] repr={repr(name)}")
     if not name:
         return False
     for pattern in _EXCLUDED_COMPILED:
         if pattern.match(name):
+            print(f"[TITLE EXCLUDED] {repr(name)} matched {pattern.pattern}")
             return False
+    print(f"[TITLE PASSED] {repr(name)}")
     return True
 
 async def fetch_icu_activities_range(api_key: str, athlete_id: str, oldest: str, newest: str) -> list:
