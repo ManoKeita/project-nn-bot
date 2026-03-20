@@ -528,7 +528,106 @@ async def unsetpublic(interaction: discord.Interaction, channel: discord.TextCha
 
 # ========== 個人チャンネル作成 ==========
 
-@bot.tree.command(name="createroom", description="【管理者】選手の個人練習チャンネルを作成する")
+@bot.tree.command(name="createroom_icu", description="【管理者】コーチ・選手・BotだけのICUカレンダー部屋を作成する")
+@app_commands.describe(
+    member="選手（メンション）",
+    coach="担当コーチ（メンション）"
+)
+@app_commands.checks.has_permissions(manage_channels=True)
+async def createroom_icu(interaction: discord.Interaction, member: discord.Member, coach: discord.Member):
+    await interaction.response.defer()
+    guild = interaction.guild
+
+    # カテゴリを探す or 作成
+    category = discord.utils.get(guild.categories, name="練習ログ")
+    if not category:
+        category = await guild.create_category("練習ログ")
+
+    channel_name = f"📊{member.display_name}-icu"
+
+    # 既存チェック
+    existing = discord.utils.get(guild.text_channels, name=channel_name.lower().replace(" ", "-"))
+    if existing:
+        await interaction.followup.send(f"⚠️ すでに存在します: {existing.mention}")
+        return
+
+    # コーチ・選手・Botのみ見える鍵付きチャンネル
+    overwrites = {
+        guild.default_role: discord.PermissionOverwrite(read_messages=False),
+        member: discord.PermissionOverwrite(read_messages=True, send_messages=True),
+        coach: discord.PermissionOverwrite(read_messages=True, send_messages=True),
+        guild.me: discord.PermissionOverwrite(
+            read_messages=True, send_messages=True,
+            embed_links=True, attach_files=True, manage_messages=True
+        )
+    }
+
+    channel = await guild.create_text_channel(
+        name=channel_name,
+        category=category,
+        overwrites=overwrites,
+        topic=f"{member.display_name} の練習カレンダーチャンネル（コーチ・選手・Bot専用）"
+    )
+
+    embed = discord.Embed(title="✅ ICUカレンダー部屋を作成しました！", color=0x00cc66)
+    embed.add_field(name="選手", value=member.mention, inline=True)
+    embed.add_field(name="コーチ", value=coach.mention, inline=True)
+    embed.add_field(name="チャンネル", value=channel.mention, inline=False)
+    embed.set_footer(text="チャンネル内で /icu_calendar_post を実行するとカレンダーが表示されます")
+    await interaction.followup.send(embed=embed)
+
+    # チャンネルに案内メッセージ
+    await channel.send(
+        f"🔒 {member.mention} と {coach.mention} の専用カレンダーチャンネルです。\n"
+        f"`/icu_calendar_post` でカレンダーを表示できます。"
+    )
+
+@bot.tree.command(name="icu_calendar_post", description="このチャンネルにICUカレンダーを投稿する")
+@app_commands.describe(
+    coach="対象コーチ（メンション）",
+    athlete_name="選手の名前"
+)
+async def icu_calendar_post(interaction: discord.Interaction, coach: discord.Member, athlete_name: str):
+    await interaction.response.defer()
+    icu_data = load_icu()
+    coach_id = str(coach.id)
+
+    if coach_id not in icu_data:
+        await interaction.followup.send(f"❌ {coach.mention} は登録されていません。", ephemeral=True)
+        return
+
+    api_key  = icu_data[coach_id]["api_key"]
+    athletes = icu_data[coach_id]["athletes"]
+
+    if athlete_name not in athletes:
+        names = "、".join(athletes.keys())
+        await interaction.followup.send(f"❌ 選手が見つかりません。登録済み: {names}", ephemeral=True)
+        return
+
+    athlete_id = get_athlete_icu_id(athletes[athlete_name])
+
+    today      = now_jst()
+    week_start = today - timedelta(days=today.weekday())
+    week_start = week_start.replace(hour=0, minute=0, second=0, microsecond=0)
+
+    embed, selectable = await build_calendar_embed(api_key, athlete_id, athlete_name, week_start)
+
+    # コーチも選手も操作できるよう user_id を None に（誰でも操作可）
+    view = CalendarView(api_key, athlete_id, athlete_name, None, week_start)
+
+    if selectable:
+        view.add_item(ActivitySelect(api_key, athlete_id, athlete_name, selectable))
+
+    one_month_ago = (now_jst() - timedelta(days=30)).replace(hour=0, minute=0, second=0, microsecond=0)
+    one_month_ago -= timedelta(days=one_month_ago.weekday())
+    for item in view.children:
+        if isinstance(item, discord.ui.Button):
+            if item.custom_id == "prev_week":
+                item.disabled = week_start <= one_month_ago
+            elif item.custom_id == "next_week":
+                item.disabled = True
+
+    await interaction.followup.send(embed=embed, view=view)
 @app_commands.describe(
     member="選手（メンション）",
     coach="担当コーチ（メンション）"
@@ -2086,7 +2185,7 @@ class CalendarView(discord.ui.View):
     @discord.ui.button(label="◀ 前の週", style=discord.ButtonStyle.secondary,
                        custom_id="prev_week", row=1)
     async def prev_week(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if str(interaction.user.id) != self.user_id:
+        if self.user_id and str(interaction.user.id) != self.user_id:
             await interaction.response.send_message("❌ 操作できません。", ephemeral=True)
             return
         self.week_start -= timedelta(days=7)
@@ -2095,7 +2194,7 @@ class CalendarView(discord.ui.View):
     @discord.ui.button(label="次の週 ▶", style=discord.ButtonStyle.secondary,
                        custom_id="next_week", row=1)
     async def next_week(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if str(interaction.user.id) != self.user_id:
+        if self.user_id and str(interaction.user.id) != self.user_id:
             await interaction.response.send_message("❌ 操作できません。", ephemeral=True)
             return
         self.week_start += timedelta(days=7)
